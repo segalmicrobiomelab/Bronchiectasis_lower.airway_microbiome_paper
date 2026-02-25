@@ -1,0 +1,2253 @@
+---
+title: "PPI"
+author: "Isabella Atandi"
+date: "2025-12-12"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(tableone)
+library(tidyr)
+library(dplyr)
+
+#Load Mapping File
+map <- read.csv("/Users/atandi01/Desktop/Data Projects/251031.NTM.Master.file.with.MRN.csv")
+
+#Subset only Primary Lobes
+map <- map[complete.cases(map[ ,c("Primary.lobe")]), ]
+
+#MRN to row names
+rownames(map) <- NULL #remove existing rownames
+map <- tibble::column_to_rownames(map,"MRN")
+
+map2 <- map
+```
+
+### Table One ###
+```{r table one}
+map2$exacerbations_num
+#continuous Variables -
+conVar <- c("BMI","Age","fvc_9","fvc_percent_9","fev1_9","fev1_percent_9","fev1_fvc_9","DLCO.pp","TLC.pp","RV.pp","WBC_blood","HB_blood","HCT_blood","PLT_blood","Neutrophil_blood","Lymphocytes_blood","Monocytes_blood","Eosinophils_blood","Basophils_blood","NET_Assay_Primary_lobes_update","Macrophages","Neutrophils","Lymphocytes","Eosinophils","Composite.CT.score_all.lobes","exacerbations_num")
+
+
+summary_stats <- data.frame()
+
+for (var in conVar) {
+  # Calculate summary stats for the total dataset
+  total_stats <- map2 %>%
+    summarise(
+      Total_Median = round(median(.data[[var]], na.rm = TRUE), 2),
+      Total_IQR_lower = round(quantile(.data[[var]], 0.25, na.rm = TRUE), 2),
+      Total_IQR_upper = round(quantile(.data[[var]], 0.75, na.rm = TRUE), 2)
+    )
+
+  # Calculate summary stats for each category
+  stats <- map2 %>%
+    filter(PPI_Current %in% c("Yes", "No")) %>%
+    group_by(PPI_Current) %>%
+    summarise(
+      Median = round(median(.data[[var]], na.rm = TRUE), 2),
+      IQR_lower = round(quantile(.data[[var]], 0.25, na.rm = TRUE), 2),
+      IQR_upper = round(quantile(.data[[var]], 0.75, na.rm = TRUE), 2),
+      .groups = "drop"
+    )
+
+  # Perform Wilcoxon rank-sum test correctly
+  wilcox_result <- wilcox.test(
+    x = map2[[var]][map2$PPI_Current == "Yes"],
+    y = map2[[var]][map2$PPI_Current == "No"]
+  )
+  p_value <- round(wilcox_result$p.value, 2)
+
+  # Reshape the data to wide format
+  stats_wide <- stats %>%
+    pivot_wider(names_from = PPI_Current, values_from = c(Median, IQR_lower, IQR_upper)) %>%
+    mutate(
+      Total = paste(total_stats$Total_Median, "[", total_stats$Total_IQR_lower, "-", total_stats$Total_IQR_upper, "]", sep=""),
+      Yes = paste(Median_Yes, "[", IQR_lower_Yes, "-", IQR_upper_Yes, "]", sep=""),
+      No = paste(Median_No, "[", IQR_lower_No, "-", IQR_upper_No, "]", sep=""),
+      p_value = p_value
+    )
+
+  # Add the variable name and select final columns
+  stats_wide <- stats_wide %>%
+    mutate(variable = var) %>%
+    dplyr::select(variable, Total, Yes, No, p_value)
+
+  # Append the results for this variable
+  summary_stats <- bind_rows(summary_stats, stats_wide)
+}
+
+stats_wide <- stats %>%
+    pivot_wider(
+      names_from = PPI_Current, 
+      values_from = c(Median, IQR_lower, IQR_upper), 
+      names_glue = "{.value}_{PPI_Current}"
+    )
+
+# Print the summary statistics for the selected variables
+print(summary_stats)
+
+# Save the summary statistics to a CSV
+write.csv(summary_stats, "continuous_PPI_Currentscore.csv", row.names = FALSE)
+
+
+catVar <- c("NTM_pos_neg.x","Sex","Race","history_smoking","cough_daily","cough_productive","hemoptysis","chest_pain","patient_dyspnea","wheezing_Yes","Diabetes","Hypertension","Hyperlipidemia","Cancer","COPD","ILD","GERD","Cardiac.arrythmia","Pulmonary.hypertension","Rheumatoid.arthritis","Cavitary.","Group","Deceased","tmt_hx","m_abscessus_bronch","mai_bronch","m_fortuitum_bronch","m_gordonae_bronch","m_kansaii_bronch","m_nebraskense_bronch","pulm_exacerb_last2years","oral_commensal_bronch_day","aspergillus_bronch","haemophilus_bronch","pseudomonas_bronch","PPI_Current","H2_Current","PPI","H2","white")
+
+
+cat_table_2 <- CreateTableOne(vars = catVar, strata = "PPI_Current", data = map2, 
+                              factorVars = catVar, addOverall = TRUE)
+
+# Convert to data frame for CSV export
+cat_table_2_df <- print(cat_table_2, quote = FALSE, noSpaces = TRUE)
+
+# Write to CSV
+write.csv(cat_table_2_df, "categorical_PPI_Currentscore.csv")
+
+
+
+```
+
+### BAL Samples ###
+```{r load microbiome, include = TRUE}
+#install qiime2R from github directly
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install(c( "microbiome"), update = FALSE)
+install.packages(
+  "microViz",
+  repos = c(davidbarnett = "https://david-barnett.r-universe.dev", getOption("repos"))
+)
+library(microViz)
+library(microbiome)
+library(stringr)
+library(qiime2R)
+library(metagMisc)
+#library(YesSiR)
+library(patchwork)
+library(phyloseq)
+library(vegan)
+library(pheatmap)
+library(ggplot2)
+library(ade4)
+library(ggforce)
+library("matrixStats")
+library(RColorBrewer)
+library(data.table)
+library(microbiome)
+library(knitr)
+library(ggrepel)
+library(ggpubr)
+library(dplyr)
+library(decontam)
+library(DESeq2)
+library(microbiomeMarker)
+library(stringr)
+library(ggprism)
+library(forcats)
+library(rstatix)
+library(patchwork)
+library(rmarkdown)
+library(ggtext)
+library(glue)
+library(tidyverse)
+library(dplyr)
+library(phyloseq)
+library(edgeR)
+library(tidytree)
+library(qiime2R)
+library(ggpubr)
+library(readr)
+library(matrixStats)
+library(ggrepel)
+
+
+```
+
+###### 16 S Data ###########
+```{r 16s Set Up }
+#Sample ID to Row names
+rownames(map2) <- map2$Sample.ID
+map2 <- map2 %>%
+  select(Sample.ID, everything())
+# Write metadata to TSV for import in phyloseq
+write.table(map2, file = "metadataPPI.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+
+PPI.OTU.Table <-qza_to_phyloseq(
+  features="/Users/atandi01/Downloads/QIIME2/QIIME2_4_DADA2/no-miss-table-dada2.ntm.qza",
+  tree="/Users/atandi01/Downloads/QIIME2/QIIME2_6_Tree/rooted-tree_quality.ntm.qza",
+  taxonomy="/Users/atandi01/Downloads/QIIME2/QIIME2_8_taxonomy/taxonomy.ntm.qza",
+  metadata = "metadataPPI.tsv"
+)
+
+sample_data(PPI.OTU.Table)$PPI_Current<-as.factor(sample_data(PPI.OTU.Table)$PPI_Current)
+
+```
+
+```{r read counts }
+
+#remove all taxa with 0 abundance
+otu.table.sub <- subset_taxa(PPI.OTU.Table,
+                             rowSums(otu_table(PPI.OTU.Table))!=0)
+
+#Sample Sums
+sequence_depth.sub <- sample_sums(otu.table.sub)
+sequence_depth.sub <-sort(sample_sums(otu.table.sub))
+
+#Define CACS group
+PPI_Current <- sample_data(otu.table.sub)$PPI_Current
+
+sequence.per.sample.sub <- data.frame(PPI_Current, sequence_depth.sub)
+sequence.per.sample.sub$PPI_Current <- factor(sequence.per.sample.sub$PPI_Current, levels = c("No", "Yes"))
+
+#get stats for all
+all_seq_data <- sequence.per.sample.sub %>% 
+  summarise(mean_seq=mean(sequence_depth.sub), 
+            median_seq=median(sequence_depth.sub), 
+            q1_seq=quantile(sequence_depth.sub, 0.25), 
+            q3_seq=quantile(sequence_depth.sub, 0.75))
+all_seq_data
+
+#save 
+write.csv(all_seq_data, file = "PPI_sequence_depth_data.csv")
+
+# Compare means using Wilcoxon test
+my.comparisons <- compare_means(sequence_depth.sub ~ PPI_Current, 
+                                 data = sequence.per.sample.sub, 
+                                 method = "wilcox.test")
+
+# View or save the result
+print(my.comparisons)
+write.csv(my.comparisons, file = "PPI_compare_means.csv")
+
+
+
+# Save PDF
+pdf(file = "PPI_readcounts.pdf", height = 10, width = 7)
+
+ggplot(data=sequence.per.sample.sub, 
+       mapping = aes(x=PPI_Current, y=sequence_depth.sub, fill=PPI_Current)) +
+  geom_boxplot() +
+  stat_boxplot(geom = "errorbar", width=0.15) +
+  scale_fill_manual(values = c("blue", "darkorange1")) +
+  geom_jitter(color="black", size=0.4, alpha=0.7) +
+  labs(x= '', y='Total Reads') +
+  scale_x_discrete(labels = c("Not on PPI", "On PPI")) +
+  scale_y_continuous(trans = "log10") +
+  guides(fill="none") +
+  stat_compare_means(comparisons = list(c("No", "Yes")), 
+                     method = "wilcox.test", label = "p.value", size = 10) +
+  theme_classic() +
+  theme(text = element_text(size = 16), 
+        axis.title.x = element_text(size = 24, face = "bold"), 
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 20, face = "bold"), 
+        axis.title.y = element_text(size = 24, face = "bold"))
+
+
+dev.off()
+
+
+```
+
+```{r ddpcr, include = TRUE}
+
+# Extract metadata
+PPI.OTU.Table.metadata <- data.frame(sample_data(PPI.OTU.Table))
+
+# Harmonize variable names and factor levels
+PPI.OTU.Table.metadata$PPI_Current <- factor(PPI.OTU.Table.metadata$PPI_Current, 
+                                             levels = c("No", "Yes"))
+PPI.OTU.Table.metadata$ddPCR_value <- as.numeric(PPI.OTU.Table.metadata$ddPCR_value)
+
+# Compare means using Wilcoxon test
+dpcr_stats <- compare_means(ddPCR_value ~ PPI_Current, 
+                             data = PPI.OTU.Table.metadata, 
+                             method = "wilcox.test")
+
+# Save comparison results
+write.csv(dpcr_stats, file = "PPI_ddPCR_compare_means.csv")
+
+# Save PDF plot
+pdf(file = "All_samples_16S_dPCR.pdf", height = 10, width = 7)
+
+ggplot(data = PPI.OTU.Table.metadata, 
+       aes(x = PPI_Current, y = ddPCR_value, fill = PPI_Current)) +
+  geom_boxplot() +
+  stat_boxplot(geom = "errorbar", width = 0.15) +
+  scale_fill_manual(values = c("blue", "darkorange1")) +
+  geom_jitter(color = "black", size = 0.4, alpha = 0.7) +
+  labs(x = '', y = '16S rRNA Gene Copies/uL') +
+  scale_x_discrete(labels = c("Not on PPI", "On PPI")) +
+  scale_y_continuous(trans = "log10") +
+  guides(fill = "none") +
+  stat_compare_means(
+    comparisons = list(c("No", "Yes")), 
+    method = "wilcox.test", 
+    label = "p.value", 
+    size = 10
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(size = 16),
+    axis.title.x = element_text(size = 24, face = "bold"),
+    axis.text.x = element_text(size = 20, face = "bold"),
+    axis.text.y = element_text(size = 20, face = "bold"),
+    axis.title.y = element_text(size = 24, face = "bold")
+  )
+
+dev.off()
+
+```
+
+```{r alpha diversity}
+
+#calculate alpha diversity 
+alpha.measures <- data.frame("Shannon" = estimate_richness(PPI.OTU.Table, measures = "Shannon"), 
+                             "Observed" = estimate_richness(PPI.OTU.Table, measures = "Observed"),
+                             "Simpson" = estimate_richness(PPI.OTU.Table, measures = "Simpson"),
+                             "Class" = sample_data(PPI.OTU.Table)$PPI_Current)
+alpha.measures <- alpha.measures %>% 
+  mutate(Class = factor(Class, levels = c("No", "Yes")))
+
+
+#export for use in Prism 
+write_csv(alpha.measures, file = "Alpha.Measures.All.Samples.For.Prism.csv")
+#calculate stats for shannon
+my.comparisons <- compare_means(Shannon~Class, data = alpha.measures)
+#save it
+write.csv(my.comparisons, file = "Shannon.stats.All.samples.csv")
+
+# plot it
+pdf(file = "Shannon.PPI.samples.pdf", width = 7, height = 10)
+ggplot(alpha.measures, aes(x = Class, y = Shannon, fill = Class)) +
+  geom_boxplot(alpha = 0.6) +
+  stat_boxplot(geom = "errorbar", width = 0.15) +
+  scale_fill_manual(values = c("blue", "darkorange1")) +
+  geom_jitter(color = "black", size = 1.6) +
+  xlab("") +
+  ylab("Shannon") +
+  scale_x_discrete(labels = c("Not on PPI", "On PPI")) +
+  stat_compare_means(comparisons = list(c("No", "Yes")), 
+                     method = "wilcox.test", 
+                     label = "p.value", 
+                     size = 10) +
+  theme_classic() +
+  theme(text = element_text(size = 16), 
+        axis.title.x = element_text(size = 32, face = "bold"), 
+        axis.text.x = element_text(size = 32, face = "bold"),
+        axis.text.y = element_text(size = 32, face = "bold"), 
+        axis.title.y = element_text(size = 32, face = "bold")) +
+  guides(fill = "none")
+dev.off()
+
+
+
+
+#repeat for observed 
+my.comparisons <- compare_means(Observed~Class, data = alpha.measures)
+#save it
+write.csv(my.comparisons, file = "Observed.stats.All.samples.csv")
+
+# plot it
+pdf(file = "Observed.PPI.samples.pdf", width=7, height=10)
+ggplot(alpha.measures, aes(x=Class, y=Observed, fill=Class))+
+  geom_boxplot()+
+  stat_boxplot(geom = "errorbar", width= 0.15)+
+  scale_fill_manual(values = c("blue", "darkorange1"))+
+  geom_jitter(color="black", size=0.4, alpha=0.7)+
+  xlab("")+ylab("Observed")+
+  scale_x_discrete(labels = c("Not on PPI", "On PPI")) + 
+  stat_compare_means(comparisons = list(c("No", "Yes")), 
+                     method = "wilcox.test", 
+                     label = "p.value", 
+                     size = 10) +
+  theme_classic()+
+  theme(text = element_text(size = 16), 
+        axis.title.x = element_text(size = 24, face = "bold"), 
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 20, face = "bold"), 
+        axis.title.y = element_text(size = 24, face = "bold"))+
+  guides(fill="none")
+dev.off()
+
+
+
+#repeat for Simpson index 
+my.comparisons <- compare_means(Simpson~Class, data = alpha.measures)
+#save it
+write.csv(my.comparisons, file = "Simpson.stats.All.samples.csv")
+
+
+# plot it
+pdf(file = "Simpson.PPI.samples.pdf", width=7, height=10)
+ggplot(alpha.measures, aes(x=Class, y=Simpson, fill=Class))+
+  geom_boxplot()+
+  stat_boxplot(geom = "errorbar", width= 0.15)+
+  scale_fill_manual(values = c("blue", "darkorange1"))+
+  geom_jitter(color="black", size=0.4, alpha=0.7)+
+  xlab("")+ylab("Simpson")+
+  scale_x_discrete(labels = c("Not on PPI", "On PPI")) + 
+  stat_compare_means(comparisons = list(c("No", "Yes")), 
+                     method = "wilcox.test", 
+                     label = "p.value", 
+                     size = 10) +
+  theme_classic()+
+  theme(text = element_text(size = 16), 
+        axis.title.x = element_text(size = 24, face = "bold"), 
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 20, face = "bold"), 
+        axis.title.y = element_text(size = 24, face = "bold"))+
+  guides(fill="none")
+dev.off()
+
+
+```
+
+```{r beta diversity}
+##Normalize OTU Table
+#Function
+normalizeSample = function(x) {
+    x/sum(x)
+}
+#Tax Glom Normalized
+PPI.OTU.Table.rel = transformSampleCounts(PPI.OTU.Table, normalizeSample)
+
+library(vegan)
+#Create Distance Matrix
+vegdist = vegdist(t(otu_table(PPI.OTU.Table.rel)), method = "bray")
+
+#Formulate principal component co-ordinates for PCOA plot, k as the choice of PCs
+CmdScale <- cmdscale(vegdist, k =10)
+CmdScale <- as.matrix(cmdscale(vegdist, k = 10))
+#calculated Sample variance for each PC
+vars <- colVars(CmdScale)
+#vars <- apply(CmdScale, 2, var)
+#Create Variable with the Percent Variance
+percentVar <- round(100 * (vars/sum(vars)))
+
+#Merge PC Data with MetaData
+newResults <- merge(x = CmdScale, y = sample_data(PPI.OTU.Table.rel), by = "row.names", all.x = TRUE)
+#Rename Variables for PC1 and PC2
+colnames(newResults)[colnames(newResults)=="V1"] <- "PC1"
+colnames(newResults)[colnames(newResults)=="V2"] <- "PC2"
+colnames(newResults)[colnames(newResults)=="Row.names"] <- "name"
+
+#Calculate the Centroid Value
+centroids <- aggregate(cbind(PC1,PC2)~PPI_Current,data= newResults, mean)
+#Merge the Centroid Data into the PCOA Data
+newResults <- merge(newResults,centroids,by="PPI_Current",suffixes=c("",".centroid"))
+
+# Adjust factor levels for two groups (PPI_Current) "Low", "High"
+newResults$PPI_Current <- factor(newResults$PPI_Current, levels = c("Yes", "No"))
+centroids$PPI_Current <- factor(centroids$PPI_Current, levels = c("Yes", "No"))
+
+# Plot the beta diversity (PCoA) with centroids and connecting segments
+pdf(file = "PPI.Beta.Diversity.Bray.TwoGroups.pdf", height = 20, width = 18)
+ggplot(newResults, aes(PC1, PC2, color = PPI_Current)) +
+  geom_point(size = 7,alpha = 0.6) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  scale_color_manual(values = c("darkorange1", "blue")) +
+  geom_point(data = centroids, aes(x = PC1, y = PC2, color = PPI_Current), size = 0) +
+  geom_segment(aes(x = PC1.centroid, y = PC2.centroid, 
+                   xend = PC1, yend = PC2, color = PPI_Current)) +
+  geom_label_repel(data = centroids, aes(x = PC1, y = PC2, 
+                                         label = c("Not on PPI", "On PPI")), 
+                   size = 26) +
+  ggtitle("Beta Diversity PPI, Bray, Two Groups, p=0.531") +
+  theme(panel.background = element_blank(),
+        panel.border = element_rect(fill = NA,colour = "black",size=2),
+        panel.grid.major = element_line(linetype = "dashed", size = 0.5, colour = "grey80"),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        axis.title = element_text(size = 45, face = "bold"),
+        axis.text.x = element_text(colour = "black", size = 8),
+        axis.text.y = element_text(colour = "black", size = 8),
+        axis.ticks = element_blank(),
+        plot.margin = unit(c(1,1,1,1), "line"),
+        legend.position = "none")
+dev.off()
+
+# Perform PERMANOVA test using adonis2 and save results to a text file
+write.table(adonis2(vegdist ~ sample_data(PPI.OTU.Table.rel)$PPI_Current), 
+            file = "stats.bray.two.groups.txt", sep = "\t")
+
+
+
+```
+
+```{r edgeR and Volcano}
+library(qiime2R)
+library(phyloseq)
+library(tidyr)
+library(dplyr)
+library(microbiome)
+library(microbiomeMarker)
+library(stringr)
+library(reshape2)
+library(openxlsx)
+library(janitor)
+library(data.table)
+library(edgeR)
+library(microbiome)
+
+#devtools::install_github("david-barnett/microViz")
+getwd()
+
+#PPI.OTU.Table
+
+PPI.OTU.Table.genus <-tax_glom(PPI.OTU.Table, taxrank = "Genus")
+
+source("/Users/atandi01/Desktop/KW_functions_OG.fr.R")
+
+
+
+######### Volcano edgeR ######### Class 1 & 2
+Edger_phylo_KW(input_phyloseq = PPI.OTU.Table.genus,
+               variable_to_compare="PPI_Current",
+               outcome_to_compare=c("No", "Yes"), 
+               outcome_to_compare_color=c("blue", "darkorange1"),
+               FDR_cut_off=0.2,
+               number_display=30,
+               graph_option="volcano",
+               display_all_results_volcano="yes", #display all the results in volcano plot (including results that is not significant: FDR not below the cut off)
+               abundance_size_volcano="no", #change size of the dot based on relative abundance
+               output_name="genus_vol_species_PPI_meta",
+               legend_onplot="yes",
+               taxa_genus_output="yes")
+
+######### Lollipop EdgeR #########
+Edger_phylo_KW(input_phyloseq = PPI.OTU.Table.genus,
+               variable_to_compare="PPI_Current",
+               outcome_to_compare=c("No", "Yes"), 
+               outcome_to_compare_color=c("blue", "darkorange1"),
+               FDR_cut_off=0.2,
+               number_display=40,
+               graph_option="lollipop",
+               output_name="genus_lol_species_PPI_meta",
+               legend_onplot="yes",
+               taxa_genus_output="yes")
+
+
+
+```
+
+```{r 16s modified volcano plot}
+input_phyloseq <- PPI.OTU.Table.genus
+variable_to_compare <- "PPI_Current" 
+outcome_to_compare1 <- "No"
+outcome_to_compare_color1 <- "blue"
+outcome_to_compare_color2 <- "darkorange1"
+outcome_to_compare2 <- "Yes"
+FDR_cut_off <- 0.2
+number_display <- 30
+output_name <- "genus_volcano_PPI"
+cols <- "grey" 
+
+
+#Orientation - Transpose if taxa aren't rows
+if( !taxa_are_rows(input_phyloseq) ){ input_phyloseq <- t(input_phyloseq)}
+
+##coldata is the meta data
+coldata<-as.data.frame(sample_data(input_phyloseq))
+
+  #getting taxa name
+taxa.table <- as.data.frame(tax_table(input_phyloseq))
+countdata<-as.data.frame(otu_table(input_phyloseq))
+row.names(countdata)<-paste(taxa.table[[2]],taxa.table[[3]],taxa.table[[4]],taxa.table[[5]], taxa.table[[6]], taxa.table[[7]],rownames(taxa.table), sep=".")
+taxa.table$combine_name<-paste(taxa.table[[2]],taxa.table[[3]],taxa.table[[4]],taxa.table[[5]], taxa.table[[6]], taxa.table[[7]],rownames(taxa.table), sep=".")
+
+#Convert to numeric
+countdata= data.frame(lapply(countdata, function(x) as.numeric(as.character(x))),
+                        check.names=F, row.names = rownames(countdata))
+
+#Set order
+  coldata_SAMPLE <- data.frame(coldata[order(row.names(coldata)),],check.names=F)
+  countdata_SAMPLE <- data.frame(countdata[, order(colnames(countdata))],check.names=F)
+
+  
+#making a compare variable to standardize the input variable for comparsion- make sure the reference is always control
+  coldata_SAMPLE$variable_to_compare<-coldata_SAMPLE[[variable_to_compare]]
+  coldata_SAMPLE<- coldata_SAMPLE %>% dplyr::mutate(compare=case_when((variable_to_compare==outcome_to_compare1)~"control", (variable_to_compare==outcome_to_compare2)~"treatment"))
+  coldata_SAMPLE<-coldata_SAMPLE[!is.na(coldata_SAMPLE$compare),] ###dropping subjects if they are not in the group of comparsion
+  coldata_SAMPLE$compare<- as.factor(coldata_SAMPLE$compare) #converting variable to factor
+  countdata_SAMPLE<-countdata_SAMPLE[,colnames(countdata_SAMPLE) %in% rownames(coldata_SAMPLE)]#making sure coldata has same subjects and countdata
+  
+taxa_name<- subset(taxa.table, select=c(combine_name))
+
+  #Set order
+  coldata_SAMPLE <- data.frame(coldata_SAMPLE[order(row.names(coldata_SAMPLE)),])
+  countdata_SAMPLE <- data.frame(countdata_SAMPLE[, order(colnames(countdata_SAMPLE))])
+  
+  #set up the phyloseq to make sure the control and treatment groups are correct. remove any observation that do not belong to the control and treatment group
+  phyloseq_edited<-input_phyloseq
+
+sample_data(phyloseq_edited)$compare <- NA
+sample_data(phyloseq_edited)$compare[sample_data(phyloseq_edited)[[variable_to_compare]] == outcome_to_compare1] <- "control"
+sample_data(phyloseq_edited)$compare[sample_data(phyloseq_edited)[[variable_to_compare]] == outcome_to_compare2] <- "treatment"
+
+#Convert to Factor
+sample_data(phyloseq_edited)$compare <- factor(sample_data(phyloseq_edited)$compare,levels = c("control", "treatment"))
+
+# Now define keep_sample separately
+keep_sample <- get_variable(phyloseq_edited, "compare") %in% c("control", "treatment")
+phyloseq_edited3 <- prune_samples(keep_sample, phyloseq_edited)
+
+              #Run EDGER
+              ######from phyloseq_to_edgeR
+              #https://joey711.github.io/phyloseq-extensions/edgeR.html 
+                    if( !taxa_are_rows(phyloseq_edited3) ){ phyloseq_edited3 <- t(phyloseq_edited3) }
+                    x = as(otu_table(phyloseq_edited3), "matrix")
+                    # Add one to protect against overflow, log(0) issues.
+                    x = x + 1
+                    # Check `compare` argument
+                    if( identical(all.equal(length("compare"), 1), TRUE) & nsamples(phyloseq_edited3) > 1 ){
+                      # Assume that compare was a sample variable name (must be categorical)
+                      group = get_variable(phyloseq_edited3, "compare")
+                    }
+                    # Define gene annotations (`genes`) as tax_table
+                    taxonomy = tax_table(phyloseq_edited3, errorIfNULL=FALSE)
+                    if( !is.null(taxonomy) ){
+                      taxonomy = data.frame(as(taxonomy, "matrix"))
+                    } 
+                    # Now turn into a DGEList
+                    y = DGEList(counts=x, group=group, genes=taxonomy,remove.zeros = TRUE)
+                    # Calculate the normalization factors
+                    z = calcNormFactors(y, method="TMM")
+                    # Check for division by zero inside `calcNormFactors`
+                    if( !all(is.finite(z$samples$norm.factors)) ){
+                      stop("Something wrong with edgeR::calcNormFactors on this data,
+                           non-finite $norm.factors, consider changing `method` argument")
+                    }
+                    # Estimate dispersions
+                    dgeFull<-estimateTagwiseDisp(estimateCommonDisp(z))
+              dgeTest <- exactTest(dgeFull)
+              dgeTest <-dgeTest
+              dgeFull <-dgeFull
+
+              #Create Table
+              resNoFilt <- topTags(dgeTest, n=nrow(dgeTest$table))
+              resNoFilt <- data.frame(resNoFilt)
+              resNoFilt<-merge(resNoFilt,taxa_name, by="row.names")
+              row.names(resNoFilt)<-resNoFilt$combine_name 
+              resNoFilt<- subset(resNoFilt,select=c(logFC, logCPM, PValue, FDR))
+              resNoFilt_export<<-resNoFilt
+
+              # Identify significant taxa
+              sig_taxa <- resNoFilt[resNoFilt$FDR < FDR_cut_off, ]
+              sig_taxa_names <- rownames(sig_taxa)
+
+              if (nrow(sig_taxa) == 0) {
+                message(paste0("⚠️ No taxa with FDR <", FDR_cut_off, " — continuing with all taxa as grey."))
+              }
+                    
+            #  resNoFilt[nrow(resNoFilt) + 1,] <- c(0, 0, 0, 0) ###adding this row of 0 so that even if there is no significant top 10 for upregulated or downregulated, the code will still run
+              #Create Table of Down Regulated
+              sigDownReg <- resNoFilt[resNoFilt$FDR<FDR_cut_off,] #keeping only FDR < 0.2
+              #sigDownReg <- resNoFilt
+              sigDownReg <- sigDownReg[sigDownReg$logFC<=0,] ##keeping only the negative logFC
+              sigDownReg <- sigDownReg[order(sigDownReg$logFC),]
+              sigDownReg1 <<- sigDownReg %>% dplyr::slice(1:number_display) #Subset Top (number_display)
+              #Create Table of Up Regulated
+              sigUpReg <- resNoFilt[resNoFilt$FDR<FDR_cut_off,] #keeping only FDR < 0.2
+              #sigUpReg <- resNoFilt
+              sigUpReg <- sigUpReg[sigUpReg$logFC>=0,] ##keeping only the positive logFC
+              sigUpReg <- sigUpReg[order(sigUpReg$logFC, decreasing=TRUE),]
+              sigUpReg1 <<- sigUpReg %>% dplyr::slice(1:number_display) #Subset Top (number_display)
+              #Merge Top 10s
+              sigDownReg <- resNoFilt[resNoFilt$FDR < FDR_cut_off & resNoFilt$logFC <= 0,]
+              sigUpReg   <- resNoFilt[resNoFilt$FDR < FDR_cut_off & resNoFilt$logFC >= 0,]
+
+              # Keep all taxa for the volcano plot
+                res <- resNoFilt
+  
+              #remove the 0 column which was used as a place holder
+              # resNoFilt <- resNoFilt[resNoFilt$logFC!=0,] 
+              
+             #=== Relative Abundance Table ===
+             # ===============================
+
+             df <- countdata_SAMPLE %>%
+               rownames_to_column('gs') %>%
+               group_by(gs) %>%
+               summarise_all(sum) %>%
+               mutate_if(is.numeric, ~ . / sum(.)) %>%
+               column_to_rownames('gs')
+
+             # Compute mean relative abundance only for significant taxa
+             df_sig <- df[rownames(df) %in% sig_taxa_names, , drop = FALSE]
+
+             coldata.1 <- coldata_SAMPLE[coldata_SAMPLE[[variable_to_compare]] == outcome_to_compare1, ]
+             coldata.2 <- coldata_SAMPLE[coldata_SAMPLE[[variable_to_compare]] == outcome_to_compare2, ]
+
+             df.1.meanRA <- if (nrow(df_sig) > 0) rowMeans(df_sig[, colnames(df_sig) %in% rownames(coldata.1), drop = FALSE]) else numeric(0)
+             df.2.meanRA <- if (nrow(df_sig) > 0) rowMeans(df_sig[, colnames(df_sig) %in% rownames(coldata.2), drop = FALSE]) else numeric(0)
+
+             # Assign tiny pseudo-abundance for non-sig taxa
+             pseudo_abundance <- ifelse(length(df.1.meanRA) > 0,
+                           min(c(df.1.meanRA, df.2.meanRA), na.rm = TRUE) * 0.01,
+                           1e-8)
+
+              
+             # Initialize full abundance vectors with pseudo values
+             df.1.meanRA_all <- setNames(rep(pseudo_abundance, nrow(resNoFilt)), rownames(resNoFilt))
+             df.2.meanRA_all <- df.1.meanRA_all
+
+             # Replace sig taxa with true mean RA values
+             if (length(df.1.meanRA) > 0) df.1.meanRA_all[names(df.1.meanRA)] <- df.1.meanRA
+             if (length(df.2.meanRA) > 0) df.2.meanRA_all[names(df.2.meanRA)] <- df.2.meanRA
+
+             # Add to results
+             resNoFilt$abundance.1 <- df.1.meanRA_all[rownames(resNoFilt)]
+             resNoFilt$abundance.2 <- df.2.meanRA_all[rownames(resNoFilt)]
+             resNoFilt$abundance   <- pmax(resNoFilt$abundance.1, resNoFilt$abundance.2, na.rm = TRUE)
+             
+             res <- resNoFilt
+ 
+             #Set Names of Results Table
+res <- setNames(cbind(rownames(res), res, row.names = NULL), c("Taxa","logFC", "lfcSE", "pvalue", "FDR","abundance.1","abundance.2","abundance"))  
+
+                        res<- res %>% dplyr::mutate(Taxa2=case_when((sapply(strsplit(Taxa,".",fixed=T),"[[",1)=="NA")~"k_Bacteria.p_NA.c_NA.o_NA.f_NA.g_NA",
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",1)!="NA") & (sapply(strsplit(Taxa,".",fixed=T),"[[",2)=="NA"))~paste0(paste0("p_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",1)),".c_NA.o_NA.f_NA.g_NA"), 
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",2)!="NA") & (sapply(strsplit(Taxa,".",fixed=T),"[[",3)=="NA"))~paste0(paste0("c_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",2)),".o_NA.f_NA.g_NA"), 
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",3)!="NA") & (sapply(strsplit(Taxa,".",fixed=T),"[[",4)=="NA"))~paste0(paste0("o_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",3)),".f_NA.g_NA"), 
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",4)!="NA") & (sapply(strsplit(Taxa,".",fixed=T),"[[",5)=="NA"))~paste0(paste0("f_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",4)),".g_NA"),
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",5)!="NA"))~paste0("g_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",5)) ))             
+res <- res %>% dplyr::mutate(Taxa2 = paste0(Taxa2, ".", substr(Taxa, nchar(Taxa)-2, nchar(Taxa))))  
+head(res)
+             # ===============================
+             # === Add effect size and colors ===
+             # ===============================
+
+ # --- Compute -log10 FDR (or adj.P.Val) for y-axis
+res$sig <- -log10(res$FDR)
+res[is.infinite(res$sig), "sig"] <- 350  # handle zeros
+
+# --- Define colors
+cols <- rep("grey", nrow(res))
+cols[res$logFC > 0 & res$FDR < FDR_cut_off] <- outcome_to_compare_color2
+cols[res$logFC < 0 & res$FDR < FDR_cut_off] <- outcome_to_compare_color1
+
+# --- Determine top taxa for bold labels
+top_up <- res %>%
+  filter(logFC > 0 & FDR < FDR_cut_off) %>%
+  arrange(desc(logFC)) %>%
+  slice_head(n = 50) %>%
+  pull(Taxa2)
+
+top_down <- res %>%
+  filter(logFC < 0 & FDR < FDR_cut_off) %>%
+  arrange(logFC) %>%
+  slice_head(n = 50) %>%
+  pull(Taxa2)
+
+top_taxa <- c(top_up, top_down)
+res$bold_label <- res$Taxa2 %in% top_taxa
+
+# --- Scale label size by abundance
+min_text_size <- 5
+max_text_size <- 10
+#res$label_size <- pmax(res$abundance / max(res$abundance, na.rm = TRUE) * max_text_size, min_text_size)
+
+res$label_size <- scales::rescale(res$abundance, to = c(min_text_size, max_text_size))
+
+
+# Subset data
+down_sig <- subset(res, logFC < -1 & FDR < FDR_cut_off)
+up_sig <- subset(res, logFC > 1 & FDR < FDR_cut_off)
+
+p <- ggplot(res, aes(x = logFC, y = sig)) +
+  geom_point(aes(size = abundance), color = cols, alpha = 0.5) +
+  scale_size_continuous(range = c(1, 40)) +
+
+  # Downregulated labels
+  geom_text_repel(
+    data = down_sig,
+    aes(label = Taxa2, fontface = ifelse(bold_label, "bold", "plain")),
+    size = down_sig$label_size,   # use numeric vector here
+    force = 25,
+    segment.colour = "grey",
+    segment.alpha = 0.5,
+    min.segment.length = 0
+  ) +
+
+  # Upregulated labels
+  geom_text_repel(
+    data = up_sig,
+    aes(label = Taxa2, fontface = ifelse(bold_label, "bold", "plain")),
+    size = up_sig$label_size,  # numeric vector
+    force = 25,
+    segment.colour = "grey",
+    segment.alpha = 0.5,
+    min.segment.length = 0
+  ) +
+
+  geom_hline(yintercept = -log10(FDR_cut_off), color = "red", linetype = "dashed") +
+  xlab("Effect size: log2(fold-change)") +
+  ylab("-log10(adjusted p-value)") +
+  theme(
+    panel.background = element_blank(),
+    panel.border = element_rect(fill = NA),
+    legend.background = element_rect(color = NA),
+    legend.key = element_rect(colour = "transparent", fill = "white"),
+    plot.title = element_text(size = 23, face = "bold"),
+    axis.title.x = element_text(size = 23, face = "bold"),  # Set size of x-axis title
+    axis.title.y = element_text(size = 23, face = "bold"),  # Set size of y-axis title
+    axis.text = element_text(size = 16)    
+  ) +
+  guides(size = "none")
+
+
+# --- Save as PNG
+png_output <- paste0(output_name, ".png")
+png(file = png_output, res = 300, width = 300, height = 300, units = 'mm')
+print(p)
+dev.off()
+ 
+
+
+ 
+```
+
+```{r modified lollipop}
+Edger_phylo_KW2 <- function (input_phyloseq, 
+                            variable_to_compare,
+                            outcome_to_compare=list(),
+                            outcome_to_compare_color=list(),
+                            FDR_cut_off=0.2,
+                            number_display=10,
+                            graph_option=c("volcano","lollipop"),
+                            display_all_results_volcano=c("yes","no"), #display all the results in volcano plot (including results that is not significant: FDR not below the cut off)
+                            abundance_size_volcano=c("yes","no"), #change size of the dot based on relative abundance
+                            output_name,
+                            legend_onplot=c("yes","no"),
+                            decontam=NULL,
+                            taxa_genus_output) {
+  ###ensure intput_phyloseq is a absolute count phyloseq, not relative abundance phyloseq. and make sure phyloseq is in right orientation
+  # Enforce orientation. Samples are columns
+  if( !taxa_are_rows(input_phyloseq) ){ input_phyloseq <- t(input_phyloseq)}
+  countData_check <- floor(as(otu_table(input_phyloseq), "matrix")) # round down to nearest integer. if this phsyloeq is a relative abundance, then the entire countData_check would be 0
+  if (all(countData_check==0)) {stop("Please use phyloseq with absolute count. The current input physloeq contains relative abundnace")}
+  
+  if (missing(taxa_genus_output)) { taxa_genus_output<-"no"} #default being yes for taxa_rank_name, which will just give the selected taxa name
+  if (missing(graph_option)) { graph_option<-"lollipop"} #default being lollipop for graph_option
+  if (missing(display_all_results_volcano)) { display_all_results_volcano<-"no"} #default being lollipop for graph_option
+  if (missing(abundance_size_volcano)) { abundance_size_volcano<-"yes"} #default being lollipop for graph_option
+  
+  ## evaluate choices
+  legend_onplot <- match.arg(legend_onplot)
+
+  for (i in 1:length(outcome_to_compare)) {
+    assign(paste0("outcome_to_compare",i), outcome_to_compare[[i]])
+    assign(paste0("outcome_to_compare_color",i), outcome_to_compare_color[[i]])
+  }  
+  
+  ##coldata is the meta data
+  coldata<-as.data.frame(sample_data(input_phyloseq))
+  #getting taxa name
+  taxa.table <- as.data.frame(tax_table(input_phyloseq))
+  countdata<-as.data.frame(otu_table(input_phyloseq))
+  row.names(countdata)<-paste(taxa.table[[2]],taxa.table[[3]],taxa.table[[4]],taxa.table[[5]], taxa.table[[6]], taxa.table[[7]],rownames(taxa.table), sep=".")
+  taxa.table$combine_name<-paste(taxa.table[[2]],taxa.table[[3]],taxa.table[[4]],taxa.table[[5]], taxa.table[[6]], taxa.table[[7]],rownames(taxa.table), sep=".")
+  #Convert to numeric
+  countdata= data.frame(lapply(countdata, function(x) as.numeric(as.character(x))),
+                        check.names=F, row.names = rownames(countdata))
+  #Set order
+  coldata_SAMPLE <- data.frame(coldata[order(row.names(coldata)),],check.names=F)
+  countdata_SAMPLE <- data.frame(countdata[, order(colnames(countdata))],check.names=F)
+  
+  #making a compare variable to standardize the input variable for comparsion- make sure the reference is always control
+  coldata_SAMPLE$variable_to_compare<-coldata_SAMPLE[[variable_to_compare]]
+  coldata_SAMPLE<- coldata_SAMPLE %>% dplyr::mutate(compare=case_when((variable_to_compare==outcome_to_compare1)~"control", (variable_to_compare==outcome_to_compare2)~"treatment"))
+  coldata_SAMPLE<-coldata_SAMPLE[!is.na(coldata_SAMPLE$compare),] ###dropping subjects if they are not in the group of comparsion
+  coldata_SAMPLE$compare<- as.factor(coldata_SAMPLE$compare) #converting variable to factor
+  countdata_SAMPLE<-countdata_SAMPLE[,colnames(countdata_SAMPLE) %in% rownames(coldata_SAMPLE)]#making sure coldata has same subjects and countdata
+
+  taxa_name<- subset(taxa.table, select=c(combine_name))
+  
+  #Set order
+  coldata_SAMPLE <- data.frame(coldata_SAMPLE[order(row.names(coldata_SAMPLE)),])
+  countdata_SAMPLE <- data.frame(countdata_SAMPLE[, order(colnames(countdata_SAMPLE))])
+  #Added in code from SEB -> removes X in front of potential IDs that start with a number
+  # colnames(countdata_SAMPLE) <- gsub("^X", "", colnames(countdata_SAMPLE))
+  
+  #set up the phyloseq to make sure the control and treatment groups are correct. remove any observation that do not belong to the control and treatment group
+  phyloseq_edited<-input_phyloseq
+  sample_data(phyloseq_edited)$variable_to_compare <-sample_data(phyloseq_edited)[[variable_to_compare]]
+  phyloseq_edited2 <- phyloseq_edited %>% ps_mutate(compare=case_when((variable_to_compare==outcome_to_compare1)~"control", (variable_to_compare==outcome_to_compare2)~"treatment"))
+  keep_sample<- get_variable(phyloseq_edited2,"compare") %in% c("control", "treatment")
+  phyloseq_edited3 <- prune_samples(keep_sample, phyloseq_edited2)  ###keeping only samples with the outcome variable of choice 
+
+              #Run EDGER
+              ######from phyloseq_to_edgeR
+              #https://joey711.github.io/phyloseq-extensions/edgeR.html 
+                    if( !taxa_are_rows(phyloseq_edited3) ){ phyloseq_edited3 <- t(phyloseq_edited3) }
+                    x = as(otu_table(phyloseq_edited3), "matrix")
+                    # Add one to protect against overflow, log(0) issues.
+                    x = x + 1
+                    # Check `compare` argument
+                    if( identical(all.equal(length("compare"), 1), TRUE) & nsamples(phyloseq_edited3) > 1 ){
+                      # Assume that compare was a sample variable name (must be categorical)
+                      group = get_variable(phyloseq_edited3, "compare")
+                    }
+                    # Define gene annotations (`genes`) as tax_table
+                    taxonomy = tax_table(phyloseq_edited3, errorIfNULL=FALSE)
+                    if( !is.null(taxonomy) ){
+                      taxonomy = data.frame(as(taxonomy, "matrix"))
+                    } 
+                    # Now turn into a DGEList
+                    y = DGEList(counts=x, group=group, genes=taxonomy,remove.zeros = TRUE)
+                    # Calculate the normalization factors
+                    z = calcNormFactors(y, method="TMM")
+                    # Check for division by zero inside `calcNormFactors`
+                    if( !all(is.finite(z$samples$norm.factors)) ){
+                      stop("Something wrong with edgeR::calcNormFactors on this data,
+                           non-finite $norm.factors, consider changing `method` argument")
+                    }
+                    # Estimate dispersions
+                    dgeFull<-estimateTagwiseDisp(estimateCommonDisp(z))
+              dgeTest <- exactTest(dgeFull)
+              dgeTest <-dgeTest
+              dgeFull <-dgeFull
+              
+              
+              #Create Table
+              resNoFilt <- topTags(dgeTest, n=nrow(dgeTest$table))
+              resNoFilt <- data.frame(resNoFilt)
+              resNoFilt<-merge(resNoFilt,taxa_name, by="row.names")
+              row.names(resNoFilt)<-resNoFilt$combine_name 
+              resNoFilt<- subset(resNoFilt,select=c(logFC, logCPM, PValue, FDR))
+              resNoFilt_export<<-resNoFilt
+              #check to see if there is any taxa with FDR<FDR_cut_off. If not then will stop the function, because there will be error if it continues as the object will have no rows
+                    checkifallzero<-resNoFilt[resNoFilt$FDR<FDR_cut_off,]
+                    if (dim(checkifallzero)[1] == 0) {
+                              print(paste0("no Taxa with FDR more than",FDR_cut_off))
+                              return(NULL)
+                    }
+              resNoFilt[nrow(resNoFilt) + 1,] <- c(0, 0, 0, 0) ###adding this row of 0 so that even if there is no significant top 10 for upregulated or downregulated, the code will still run
+              #Create Table of Down Regulated
+              sigDownReg <- resNoFilt[resNoFilt$FDR<FDR_cut_off,] #keeping only FDR < 0.2
+              #sigDownReg <- resNoFilt
+              sigDownReg <- sigDownReg[sigDownReg$logFC<=0,] ##keeping only the negative logFC
+              sigDownReg <- sigDownReg[order(sigDownReg$logFC),]
+              sigDownReg1 <<- sigDownReg %>% dplyr::slice(1:number_display) #Subset Top (number_display)
+              #Create Table of Up Regulated
+              sigUpReg <- resNoFilt[resNoFilt$FDR<FDR_cut_off,] #keeping only FDR < 0.2
+              #sigUpReg <- resNoFilt
+              sigUpReg <- sigUpReg[sigUpReg$logFC>=0,] ##keeping only the positive logFC
+              sigUpReg <- sigUpReg[order(sigUpReg$logFC, decreasing=TRUE),]
+              sigUpReg1 <<- sigUpReg %>% dplyr::slice(1:number_display) #Subset Top (number_display)
+              #Merge Top 10s
+              res <- rbind(sigDownReg1,sigUpReg1)
+              res <- res[res$logFC!=0,] 
+              #remove the 0 column which was used as a place holder
+              resNoFilt <- resNoFilt[resNoFilt$logFC!=0,] 
+              
+              #Create Relative Abundance Table
+              df <-
+                countdata_SAMPLE %>% 
+                rownames_to_column('gs') %>%
+                dplyr::group_by(gs) %>% 
+                dplyr::summarise_all(funs(sum)) %>%
+                dplyr::mutate_if(is.numeric, funs(./sum(.))) %>%
+                column_to_rownames('gs')
+              df_export<-df
+              #Get the ColData for Each Comparison
+              coldata.1 <- coldata_SAMPLE[coldata_SAMPLE[[variable_to_compare]]==outcome_to_compare1,]
+              coldata.2 <- coldata_SAMPLE[coldata_SAMPLE[[variable_to_compare]]==outcome_to_compare2,]
+              #keep Count data only for each comparison
+              needed<-which(colnames(df) %in% rownames(coldata.1))    
+              df.1 <- df[,needed]
+              needed2<-which(colnames(df) %in% rownames(coldata.2))    
+              df.2 <- df[,needed2]
+              #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#  
+              if (display_all_results_volcano=="yes" & graph_option=="volcano"){ #if want to display all results, then will replace res by resNoFilt (which does not select the top results)
+                res<-resNoFilt
+              }
+              
+              #Convert Resuts table into a data.frame
+              res <- as.data.frame(res)
+              resdf_check <<- res
+              #decide what otu to save 
+              otu.to.save <-as.character(rownames(res))
+              #from relative table we should get the mean across the row of the otu table
+              df.1.meanRA <- rowMeans(df.1)
+              df.2.meanRA <- rowMeans(df.2)
+              #need to subset AND reorder just the otus that we have 
+              df.1.meanRA.save <- df.1.meanRA[otu.to.save]
+              df.2.meanRA.save <- df.2.meanRA[otu.to.save]
+              #add the abundnace data for the res dataframe
+              res$abundance.1 <- df.1.meanRA.save
+              res$abundance.2 <- df.2.meanRA.save
+              #Set Names of Results Table
+              res <- setNames(cbind(rownames(res), res, row.names = NULL), c("Taxa","logFC", "lfcSE", "pvalue", "adj.P.Val","abundance.1","abundance.2")) 
+              #Remove Any Data without LOGFC data
+              res <- res[!is.na(res$logFC),]
+              # Reorder Results based on FDR for comparison 1
+              res = res[order(-res$logFC, na.last = TRUE), ]
+              #Create Order
+              res <- res %>% dplyr::mutate(start = 1:n())
+              #Convert Important columns to Numeric
+              res$adj.P.Val <- as.numeric(as.character(res$adj.P.Val))
+              res$logFC <- as.numeric(as.character(res$logFC))
+              #Replace NA
+              res <- res %>% dplyr::mutate(adj.P.Val = if_else(is.na(adj.P.Val), 0.9, adj.P.Val))
+              ##convert abundance to numeric
+              res$abundance.1 <- as.numeric(as.character(res$abundance.1))
+              res$abundance.2 <- as.numeric(as.character(res$abundance.2))
+              #Create Variable for Color based on Comparison, FDR and LOGFC
+              res$col <- ifelse(res$logFC>0, "B",
+                                ifelse(res$logFC<0, "A","D"))
+              res$abundance <- ifelse(res$col=="A", res$abundance.1, ifelse(res$col=="B", res$abundance.2,0))
+              
+              if (taxa_genus_output=="no") {
+                res$Taxa2 <- paste0(substr(sapply(strsplit(res$Taxa,".",fixed=T),"[[",1),1,6),
+                                    paste0("..",paste0(substr(sapply(strsplit(res$Taxa,".",fixed=T),"[[",4),1,10),".."),
+                                           paste0(substr(sapply(strsplit(res$Taxa,".",fixed=T),"[[",5),1,10),paste0("..",str_sub(res$Taxa,-4,-1)))))  
+              } else if (taxa_genus_output=="yes") {#keeping only genus level. if genus level is NA, then will go up a taxa rank
+                res<- res %>% dplyr::mutate(Taxa2=case_when((sapply(strsplit(Taxa,".",fixed=T),"[[",1)=="NA")~"k_Bacteria.p_NA.c_NA.o_NA.f_NA.g_NA",
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",1)!="NA") & (sapply(strsplit(Taxa,".",fixed=T),"[[",2)=="NA"))~paste0(paste0("p_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",1)),".c_NA.o_NA.f_NA.g_NA"), 
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",2)!="NA") & (sapply(strsplit(Taxa,".",fixed=T),"[[",3)=="NA"))~paste0(paste0("c_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",2)),".o_NA.f_NA.g_NA"), 
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",3)!="NA") & (sapply(strsplit(Taxa,".",fixed=T),"[[",4)=="NA"))~paste0(paste0("o_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",3)),".f_NA.g_NA"), 
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",4)!="NA") & (sapply(strsplit(Taxa,".",fixed=T),"[[",5)=="NA"))~paste0(paste0("f_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",4)),".g_NA"),
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",5)!="NA"))~paste0("g_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",5)) ))
+              }
+              res <- res %>% dplyr::mutate(Taxa2 = paste0(Taxa2, ".", substr(Taxa, nchar(Taxa)-2, nchar(Taxa))))
+              #########EXCEL EXPORT
+              ####keeping all results 
+              res_all <- rbind(sigDownReg,sigUpReg)
+              res_all <- res_all[res_all$logFC!=0,] 
+              
+              #Convert Resuts table into a data.frame
+              res_all <- as.data.frame(res_all)
+              #decide what otu to save 
+              otu.to.save_all <-as.character(rownames(res_all))
+              #need to subset AND reorder just the otus that we have 
+              df.1.meanRA.save <- df.1.meanRA[otu.to.save_all]
+              df.2.meanRA.save <- df.2.meanRA[otu.to.save_all]
+              #add the abundnace data for the res dataframe
+              res_all$abundance.1 <- df.1.meanRA.save
+              res_all$abundance.2 <- df.2.meanRA.save
+            
+              #Set Names of Results Table
+              res_all <- setNames(cbind(rownames(res_all), res_all, row.names = NULL), c("Taxa","logFC", "lfcSE", "pvalue", "adj.P.Val","abundance.1","abundance.2")) 
+              
+              #changing the name of abundance
+              abundance1<-paste0("abundnace__",outcome_to_compare[[1]])
+              abundance2<-paste0("abundnace__",outcome_to_compare[[2]])
+              names(res_all)[names(res_all) == "abundance.1"] <- abundance1
+              names(res_all)[names(res_all) == "abundance.2"] <- abundance2
+              csv_output<-paste0(output_name,"_significant.csv")
+              write.csv(res_all,file=csv_output, row.names = TRUE)
+              
+              #res_all contains all results including not significant results
+              #Convert Resuts table into a data.frame
+              res_all <- as.data.frame(resNoFilt)
+              #decide what otu to save 
+              otu.to.save_all <-as.character(rownames(res_all))
+              #need to subset AND reorder just the otus that we have 
+              df.1.meanRA.save <- df.1.meanRA[otu.to.save_all]
+              df.2.meanRA.save <- df.2.meanRA[otu.to.save_all]
+              #add the abundnace data for the res dataframe
+              res_all$abundance.1 <- df.1.meanRA.save
+              res_all$abundance.2 <- df.2.meanRA.save
+              csv_output2<-paste0(output_name,"_all.csv")
+              write.csv(resNoFilt_export,file=csv_output2, row.names = TRUE)
+              
+              ######################################################################################################################
+              ######################################################################################################################
+              ####merge in decontam list to change the contaminant taxa red
+              if (!missing(decontam)) { #if decontam option is selected, determine if the df object exist
+                if (exists(decontam)=="FALSE"){
+                  print(paste0("decontam list:",paste0(decontam," does not exist")))
+                  stop("please run function: decontaminant_subplot_KW prior to using this option- decontam") 
+                } else{
+                  res_original<-res
+                  res<-merge(res, get(decontam),by.x="Taxa",by.y="row.names",All.x=all)
+                  res<- res[order(res$logFC, na.last = TRUE), ]
+                  contaminant_color <- ifelse(res$contaminant == "TRUE", "red", "black")
+                }
+              }  else{
+                contaminant_color<-"black" ###if no decontam list was supplied, then will have all the label as black 
+              }
+              checK_res <<- res
+              
+              ######################################################################################################################
+              ######################################################################################################################
+              
+              if (graph_option=="volcano") {
+                          #=========================================================
+                          #////////////////////VOLCANO PLOT///////////////////////
+                          #=========================================================
+                          # Compute significance, with a maximum of 350 for the p-values set to 0 due to limitation of computation precision
+                          res$sig <- -log10(res$adj.P.Val)
+                          res[is.infinite(res$sig),"sig"] <- 350
+                          ## Volcano plot of adjusted p-values
+                          cols <- densCols(res$logFC, res$sig)
+                          cols[res$pvalue ==0] <- "purple"
+                          #only significant values get display
+                          cols[res$logFC > 0 & res$adj.P.Val < FDR_cut_off ] <- outcome_to_compare_color2
+                          cols[res$logFC < 0 & res$adj.P.Val < FDR_cut_off ] <- outcome_to_compare_color1
+                          cols[res$adj.P.Val > FDR_cut_off ] <- "grey"
+                          
+                          ####scaling the abundance so the circle size on the graph is standardized
+                          res_keep<-res[!(is.na(res$adj.P.Val)),]
+                          res_keep<-res_keep[res_keep$adj.P.Val<FDR_cut_off,]
+                          min_value<-min(res_keep$abundance)
+                          #make the abundance of the nonsignificant results to be minimal value
+                          res$abundance[res$adj.P.Val > FDR_cut_off]<-min_value
+                          
+                          if (abundance_size_volcano=="yes"){ #if want point size to be scaled by relative abundance
+                            p<-ggplot(res, aes(x = logFC, y = sig, label=Taxa2)) +
+                              geom_point(aes(size =abundance),color=cols, alpha=0.5) + #Chose Colors and size for dots
+                              scale_size(range = c(0, 40))+
+                              geom_text_repel(aes(label=ifelse(res$logFC<(-1) & res$adj.P.Val < FDR_cut_off , as.character(res$Taxa2),'')),size=3,force=25,segment.colour="grey",segment.alpha=0.5,  colour = contaminant_color) +
+                              geom_text_repel(aes(label=ifelse(res$logFC>1 & res$adj.P.Val < FDR_cut_off , as.character(res$Taxa2),'')),size=3,force=25,segment.colour="grey",segment.alpha=0.5,  colour = contaminant_color) +
+                              geom_hline(yintercept=-log10(FDR_cut_off), color="red",linetype="dashed") +
+                              xlab("Effect size: log2(fold-change)") +
+                              ylab("-log10(adjusted p-value)") + 
+                              theme(panel.background = element_blank(),
+                                    panel.border=element_rect(fill=NA),
+                                    legend.background = element_rect(color=NA),
+                                    legend.key = element_rect(colour = "transparent", fill = "white"),
+                                    plot.title=element_text(size=23, face="bold"))
+                          } else {
+                            p<-ggplot(res, aes(x = logFC, y = sig, label=Taxa2)) +
+                              geom_point(color=cols, alpha=0.5) + #Chose Colors and size for dots
+                              geom_text_repel(aes(label=ifelse(res$logFC<(-1) & res$adj.P.Val < FDR_cut_off , as.character(res$Taxa2),'')),size=3,force=25,segment.colour="grey",segment.alpha=0.5,  colour = contaminant_color) +
+                              geom_text_repel(aes(label=ifelse(res$logFC>1 & res$adj.P.Val < FDR_cut_off , as.character(res$Taxa2),'')),size=3,force=25,segment.colour="grey",segment.alpha=0.5,  colour = contaminant_color) +
+                              geom_hline(yintercept=-log10(FDR_cut_off), color="red",linetype="dashed") +
+                              xlab("Effect size: log2(fold-change)") +
+                              ylab("-log10(adjusted p-value)") + 
+                              theme(panel.background = element_blank(),
+                                    panel.border=element_rect(fill=NA),
+                                    plot.title=element_text(size=23, face="bold"))
+                          }
+              }
+              else if (graph_option=="lollipop") {
+                        p<-ggplot(res, aes(y=reorder(Taxa2,logFC), x=logFC,fill=col,size=abundance)) +
+                          geom_point(color="black",alpha=0.6,shape=21)+
+                          geom_segment(data=res[res$adj.P.Val<0.2,],aes(yend=reorder(Taxa2,-start)), xend=(-30), color= "black", linetype = "solid",linewidth=1)+ 
+                          scale_fill_manual(values=c("B"=outcome_to_compare_color2,"A"=outcome_to_compare_color1,"D"="white"))+ 
+                          scale_size_continuous(name="Relative Abundance",range=c(5, 20))+                
+                          ggtitle("EdgeR")+
+                          theme(panel.background = element_blank(),
+                                panel.border=element_rect(fill=NA),
+                                panel.grid.major.y = element_line(colour = "#EBEBEB",linetype="dashed"),
+                                panel.grid.minor = element_blank(),
+                                strip.background=element_blank(),
+                                axis.title=element_text(size=20,face="bold"),
+                                axis.text.x=element_text(colour="black", size=18, face="bold"),
+                                axis.text.y=element_text(colour=contaminant_color,face="bold",size=10),
+                                axis.ticks=element_line(colour="gray70"),
+                                legend.background = element_rect(color=NA),
+                                legend.key = element_rect(colour = "transparent", fill = "white"),
+                                plot.title=element_text(size=23, face="bold"))+
+                          xlab("") +
+                          ylab("")+
+                          #xlim(-7,7)+
+                          geom_vline(xintercept=0, color="red",linetype="dashed")+
+                          guides(fill="none")
+                        ##save the legend on a separate png file              
+              }          
+              if (legend_onplot=="no") { #if want to hide the legend on the plot, then will save the legend on separate png
+                  leg <- get_legend(p)
+                  png_output2<-paste0(output_name,"_legend.png")
+                  png(png_output2, res = 300, width=200, height=200, units='mm')
+                  legend<-as_ggplot(leg)
+                  show(legend)
+                  dev.off()
+                  p<-p + theme(legend.position = "none") ###remove the legend
+              }
+              png_output<-paste0(output_name,".png")
+              png(file=png_output, res = 300, width=200, height=200 , units='mm')
+                    show(p)
+              dev.off()
+}
+
+```
+
+```{r modified lollipop}
+Edger_phylo_KW2(input_phyloseq = PPI.OTU.Table.genus,
+               variable_to_compare="PPI_Current",
+               outcome_to_compare=c("No", "Yes"), 
+               outcome_to_compare_color=c("blue", "darkorange1"),
+               FDR_cut_off=0.2,
+               number_display=30,
+               graph_option="lollipop",
+               output_name="genus_lol_species_PPI_meta",
+               legend_onplot="yes",
+               taxa_genus_output="yes")
+
+```
+
+
+### Supra Samples ###
+```{r load microbiome, include = TRUE}
+#install qiime2R from github directly
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install(c( "microbiome"), update = FALSE)
+install.packages(
+  "microViz",
+  repos = c(davidbarnett = "https://david-barnett.r-universe.dev", getOption("repos"))
+)
+library(microViz)
+library(microbiome)
+library(stringr)
+library(qiime2R)
+library(metagMisc)
+#library(YesSiR)
+library(patchwork)
+library(phyloseq)
+library(vegan)
+library(pheatmap)
+library(ggplot2)
+library(ade4)
+library(ggforce)
+library("matrixStats")
+library(RColorBrewer)
+library(data.table)
+library(microbiome)
+library(knitr)
+library(ggrepel)
+library(ggpubr)
+library(dplyr)
+library(decontam)
+library(DESeq2)
+library(microbiomeMarker)
+library(stringr)
+library(ggprism)
+library(forcats)
+library(rstatix)
+library(patchwork)
+library(rmarkdown)
+library(ggtext)
+library(glue)
+library(tidyverse)
+library(dplyr)
+library(phyloseq)
+library(edgeR)
+library(tidytree)
+library(qiime2R)
+library(ggpubr)
+library(readr)
+library(matrixStats)
+library(ggrepel)
+
+
+```
+
+###### 16 S Data ###########
+```{r 16s Set Up }
+#Load Mapping File
+map <- read.csv("/Users/atandi01/Desktop/Data Projects/251031.NTM.Master.file.with.MRN.csv")
+
+#Subset only Supraglottic Samples
+map2 <- map %>%
+  filter(Description == "Sup")
+
+#Sample ID to Row names
+rownames(map2) <- map2$Sample.ID
+map2 <- map2 %>%
+  select(Sample.ID, everything())
+# Write metadata to TSV for import in phyloseq
+write.table(map2, file = "metadataPPI.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+
+PPI.OTU.Table <-qza_to_phyloseq(
+  features="/Users/atandi01/Downloads/QIIME2/QIIME2_4_DADA2/no-miss-table-dada2.ntm.qza",
+  tree="/Users/atandi01/Downloads/QIIME2/QIIME2_6_Tree/rooted-tree_quality.ntm.qza",
+  taxonomy="/Users/atandi01/Downloads/QIIME2/QIIME2_8_taxonomy/taxonomy.ntm.qza",
+  metadata = "metadataPPI.tsv"
+)
+
+sample_data(PPI.OTU.Table)$PPI_Current<-as.factor(sample_data(PPI.OTU.Table)$PPI_Current)
+
+```
+
+```{r read counts }
+
+#remove all taxa with 0 abundance
+otu.table.sub <- subset_taxa(PPI.OTU.Table,
+                             rowSums(otu_table(PPI.OTU.Table))!=0)
+
+#Sample Sums
+sequence_depth.sub <- sample_sums(otu.table.sub)
+sequence_depth.sub <-sort(sample_sums(otu.table.sub))
+
+#Define CACS group
+PPI_Current <- sample_data(otu.table.sub)$PPI_Current
+
+sequence.per.sample.sub <- data.frame(PPI_Current, sequence_depth.sub)
+sequence.per.sample.sub$PPI_Current <- factor(sequence.per.sample.sub$PPI_Current, levels = c("No", "Yes"))
+
+#get stats for all
+all_seq_data <- sequence.per.sample.sub %>% 
+  summarise(mean_seq=mean(sequence_depth.sub), 
+            median_seq=median(sequence_depth.sub), 
+            q1_seq=quantile(sequence_depth.sub, 0.25), 
+            q3_seq=quantile(sequence_depth.sub, 0.75))
+all_seq_data
+
+#save 
+write.csv(all_seq_data, file = "PPI_sequence_depth_data.csv")
+
+# Compare means using Wilcoxon test
+my.comparisons <- compare_means(sequence_depth.sub ~ PPI_Current, 
+                                 data = sequence.per.sample.sub, 
+                                 method = "wilcox.test")
+
+# View or save the result
+print(my.comparisons)
+write.csv(my.comparisons, file = "PPI_compare_means.csv")
+
+
+
+# Save PDF
+pdf(file = "PPI_readcounts.pdf", height = 10, width = 7)
+
+ggplot(data=sequence.per.sample.sub, 
+       mapping = aes(x=PPI_Current, y=sequence_depth.sub, fill=PPI_Current)) +
+  geom_boxplot() +
+  stat_boxplot(geom = "errorbar", width=0.15) +
+  scale_fill_manual(values = c("blue", "darkorange1")) +
+  geom_jitter(color="black", size=0.4, alpha=0.7) +
+  labs(x= '', y='Total Reads') +
+  scale_x_discrete(labels = c("Not on PPI", "On PPI")) +
+  scale_y_continuous(trans = "log10") +
+  guides(fill="none") +
+  stat_compare_means(comparisons = list(c("No", "Yes")), 
+                     method = "wilcox.test", label = "p.value", size = 10) +
+  theme_classic() +
+  theme(text = element_text(size = 16), 
+        axis.title.x = element_text(size = 24, face = "bold"), 
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 20, face = "bold"), 
+        axis.title.y = element_text(size = 24, face = "bold"))
+
+
+dev.off()
+
+
+```
+
+```{r ddpcr, include = TRUE}
+
+# Extract metadata
+PPI.OTU.Table.metadata <- data.frame(sample_data(PPI.OTU.Table))
+
+# Harmonize variable names and factor levels
+PPI.OTU.Table.metadata$PPI_Current <- factor(PPI.OTU.Table.metadata$PPI_Current, 
+                                             levels = c("No", "Yes"))
+PPI.OTU.Table.metadata$ddPCR_value <- as.numeric(PPI.OTU.Table.metadata$ddPCR_value)
+
+# Compare means using Wilcoxon test
+dpcr_stats <- compare_means(ddPCR_value ~ PPI_Current, 
+                             data = PPI.OTU.Table.metadata, 
+                             method = "wilcox.test")
+
+# Save comparison results
+write.csv(dpcr_stats, file = "PPI_ddPCR_compare_means.csv")
+
+# Save PDF plot
+pdf(file = "All_samples_16S_dPCR.pdf", height = 10, width = 7)
+
+ggplot(data = PPI.OTU.Table.metadata, 
+       aes(x = PPI_Current, y = ddPCR_value, fill = PPI_Current)) +
+  geom_boxplot() +
+  stat_boxplot(geom = "errorbar", width = 0.15) +
+  scale_fill_manual(values = c("blue", "darkorange1")) +
+  geom_jitter(color = "black", size = 0.4, alpha = 0.7) +
+  labs(x = '', y = '16S rRNA Gene Copies/uL') +
+  scale_x_discrete(labels = c("Not on PPI", "On PPI")) +
+  scale_y_continuous(trans = "log10") +
+  guides(fill = "none") +
+  stat_compare_means(
+    comparisons = list(c("No", "Yes")), 
+    method = "wilcox.test", 
+    label = "p.value", 
+    size = 10
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(size = 16),
+    axis.title.x = element_text(size = 24, face = "bold"),
+    axis.text.x = element_text(size = 20, face = "bold"),
+    axis.text.y = element_text(size = 20, face = "bold"),
+    axis.title.y = element_text(size = 24, face = "bold")
+  )
+
+dev.off()
+
+```
+
+```{r alpha diversity}
+
+#calculate alpha diversity 
+alpha.measures <- data.frame("Shannon" = estimate_richness(PPI.OTU.Table, measures = "Shannon"), 
+                             "Observed" = estimate_richness(PPI.OTU.Table, measures = "Observed"),
+                             "Simpson" = estimate_richness(PPI.OTU.Table, measures = "Simpson"),
+                             "Class" = sample_data(PPI.OTU.Table)$PPI_Current)
+alpha.measures <- alpha.measures %>% 
+  mutate(Class = factor(Class, levels = c("No", "Yes")))
+
+
+#export for use in Prism 
+write_csv(alpha.measures, file = "Alpha.Measures.All.Samples.For.Prism.csv")
+#calculate stats for shannon
+my.comparisons <- compare_means(Shannon~Class, data = alpha.measures)
+#save it
+write.csv(my.comparisons, file = "Shannon.stats.All.samples.csv")
+
+# plot it
+pdf(file = "Shannon.PPI.samples.pdf", width = 7, height = 10)
+ggplot(alpha.measures, aes(x = Class, y = Shannon, fill = Class)) +
+  geom_boxplot() +
+  stat_boxplot(geom = "errorbar", width = 0.15) +
+  scale_fill_manual(values = c("blue", "darkorange1")) +
+  geom_jitter(color = "black", size = 1.6) +
+  xlab("") +
+  ylab("Shannon") +
+  scale_x_discrete(labels = c("Not on PPI", "On PPI")) +
+  stat_compare_means(comparisons = list(c("No", "Yes")), 
+                     method = "wilcox.test", 
+                     label = "p.value", 
+                     size = 10) +
+  theme_classic() +
+  theme(text = element_text(size = 16), 
+        axis.title.x = element_text(size = 32, face = "bold"), 
+        axis.text.x = element_text(size = 32, face = "bold"),
+        axis.text.y = element_text(size = 32, face = "bold"), 
+        axis.title.y = element_text(size = 32, face = "bold")) +
+  guides(fill = "none")
+dev.off()
+
+
+#repeat for observed 
+my.comparisons <- compare_means(Observed~Class, data = alpha.measures)
+#save it
+write.csv(my.comparisons, file = "Observed.stats.All.samples.csv")
+
+# plot it
+pdf(file = "Observed.PPI.samples.pdf", width=7, height=10)
+ggplot(alpha.measures, aes(x=Class, y=Observed, fill=Class))+
+  geom_boxplot()+
+  stat_boxplot(geom = "errorbar", width= 0.15)+
+  scale_fill_manual(values = c("blue", "darkorange1"))+
+  geom_jitter(color="black", size=0.4, alpha=0.7)+
+  xlab("")+ylab("Observed")+
+  scale_x_discrete(labels = c("Not on PPI", "On PPI")) + 
+  stat_compare_means(comparisons = list(c("No", "Yes")), 
+                     method = "wilcox.test", 
+                     label = "p.value", 
+                     size = 10) +
+  theme_classic()+
+  theme(text = element_text(size = 16), 
+        axis.title.x = element_text(size = 24, face = "bold"), 
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 20, face = "bold"), 
+        axis.title.y = element_text(size = 24, face = "bold"))+
+  guides(fill="none")
+dev.off()
+
+
+
+#repeat for Simpson index 
+my.comparisons <- compare_means(Simpson~Class, data = alpha.measures)
+#save it
+write.csv(my.comparisons, file = "Simpson.stats.All.samples.csv")
+
+
+# plot it
+pdf(file = "Simpson.PPI.samples.pdf", width=7, height=10)
+ggplot(alpha.measures, aes(x=Class, y=Simpson, fill=Class))+
+  geom_boxplot()+
+  stat_boxplot(geom = "errorbar", width= 0.15)+
+  scale_fill_manual(values = c("blue", "darkorange1"))+
+  geom_jitter(color="black", size=0.4, alpha=0.7)+
+  xlab("")+ylab("Simpson")+
+  scale_x_discrete(labels = c("Not on PPI", "On PPI")) + 
+  stat_compare_means(comparisons = list(c("No", "Yes")), 
+                     method = "wilcox.test", 
+                     label = "p.value", 
+                     size = 10) +
+  theme_classic()+
+  theme(text = element_text(size = 16), 
+        axis.title.x = element_text(size = 24, face = "bold"), 
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 20, face = "bold"), 
+        axis.title.y = element_text(size = 24, face = "bold"))+
+  guides(fill="none")
+dev.off()
+
+
+```
+
+```{r beta diversity}
+##Normalize OTU Table
+#Function
+normalizeSample = function(x) {
+    x/sum(x)
+}
+#Tax Glom Normalized
+PPI.OTU.Table.rel = transformSampleCounts(PPI.OTU.Table, normalizeSample)
+
+library(vegan)
+#Create Distance Matrix
+vegdist = vegdist(t(otu_table(PPI.OTU.Table.rel)), method = "bray")
+
+#Formulate principal component co-ordinates for PCOA plot, k as the choice of PCs
+CmdScale <- cmdscale(vegdist, k =10)
+CmdScale <- as.matrix(cmdscale(vegdist, k = 10))
+#calculated Sample variance for each PC
+vars <- colVars(CmdScale)
+#vars <- apply(CmdScale, 2, var)
+#Create Variable with the Percent Variance
+percentVar <- round(100 * (vars/sum(vars)))
+
+#Merge PC Data with MetaData
+newResults <- merge(x = CmdScale, y = sample_data(PPI.OTU.Table.rel), by = "row.names", all.x = TRUE)
+#Rename Variables for PC1 and PC2
+colnames(newResults)[colnames(newResults)=="V1"] <- "PC1"
+colnames(newResults)[colnames(newResults)=="V2"] <- "PC2"
+colnames(newResults)[colnames(newResults)=="Row.names"] <- "name"
+
+#Calculate the Centroid Value
+centroids <- aggregate(cbind(PC1,PC2)~PPI_Current,data= newResults, mean)
+#Merge the Centroid Data into the PCOA Data
+newResults <- merge(newResults,centroids,by="PPI_Current",suffixes=c("",".centroid"))
+
+# Adjust factor levels for two groups (PPI_Current) "Low", "High"
+newResults$PPI_Current <- factor(newResults$PPI_Current, levels = c("Yes", "No"))
+centroids$PPI_Current <- factor(centroids$PPI_Current, levels = c("Yes", "No"))
+
+# Plot the beta diversity (PCoA) with centroids and connecting segments
+pdf(file = "PPI.Beta.Diversity.Bray.TwoGroups.pdf", height = 20, width = 18)
+ggplot(newResults, aes(PC1, PC2, color = PPI_Current)) +
+  geom_point(size = 7) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  scale_color_manual(values = c("darkorange1", "blue")) +
+  geom_point(data = centroids, aes(x = PC1, y = PC2, color = PPI_Current), size = 0) +
+  geom_segment(aes(x = PC1.centroid, y = PC2.centroid, 
+                   xend = PC1, yend = PC2, color = PPI_Current)) +
+  geom_label_repel(data = centroids, aes(x = PC1, y = PC2, 
+                                         label = c("Not on PPI", "On PPI")), 
+                   size = 26) +
+  ggtitle("Beta Diversity PPI, Bray, Two Groups, p=0.068") +
+  theme(panel.background = element_blank(),
+        panel.border = element_rect(fill = NA,colour = "black",size=2),
+        panel.grid.major = element_line(linetype = "dashed", size = 0.5, colour = "grey80"),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        axis.title = element_text(size = 45, face = "bold"),
+        axis.text.x = element_text(colour = "black", size = 8),
+        axis.text.y = element_text(colour = "black", size = 8),
+        axis.ticks = element_blank(),
+        plot.margin = unit(c(1,1,1,1), "line"),
+        legend.position = "none")
+dev.off()
+
+# Perform PERMANOVA test using adonis2 and save results to a text file
+write.table(adonis2(vegdist ~ sample_data(PPI.OTU.Table.rel)$PPI_Current), 
+            file = "stats.bray.two.groups.txt", sep = "\t")
+
+
+
+```
+
+```{r edgeR and Volcano}
+library(qiime2R)
+library(phyloseq)
+library(tidyr)
+library(dplyr)
+library(microbiome)
+library(microbiomeMarker)
+library(stringr)
+library(reshape2)
+library(openxlsx)
+library(janitor)
+library(data.table)
+library(edgeR)
+library(microbiome)
+
+#devtools::install_github("david-barnett/microViz")
+getwd()
+
+#PPI.OTU.Table
+
+PPI.OTU.Table.genus <-tax_glom(PPI.OTU.Table, taxrank = "Genus")
+
+source("/Users/atandi01/Desktop/KW_functions_OG.fr.R")
+
+
+
+######### Volcano edgeR ######### Class 1 & 2
+Edger_phylo_KW(input_phyloseq = PPI.OTU.Table.genus,
+               variable_to_compare="PPI_Current",
+               outcome_to_compare=c("No", "Yes"), 
+               outcome_to_compare_color=c("blue", "darkorange1"),
+               FDR_cut_off=0.2,
+               number_display=30,
+               graph_option="volcano",
+               display_all_results_volcano="yes", #display all the results in volcano plot (including results that is not significant: FDR not below the cut off)
+               abundance_size_volcano="no", #change size of the dot based on relative abundance
+               output_name="genus_vol_species_PPI_meta",
+               legend_onplot="yes",
+               taxa_genus_output="yes")
+
+######### Lollipop EdgeR #########
+Edger_phylo_KW(input_phyloseq = PPI.OTU.Table.genus,
+               variable_to_compare="PPI_Current",
+               outcome_to_compare=c("No", "Yes"), 
+               outcome_to_compare_color=c("blue", "darkorange1"),
+               FDR_cut_off=0.2,
+               number_display=30,
+               graph_option="lollipop",
+               output_name="genus_lol_species_PPI_meta",
+               legend_onplot="yes",
+               taxa_genus_output="yes")
+
+
+
+```
+
+```{r modified lollipop}
+Edger_phylo_KW2 <- function (input_phyloseq, 
+                            variable_to_compare,
+                            outcome_to_compare=list(),
+                            outcome_to_compare_color=list(),
+                            FDR_cut_off=0.2,
+                            number_display=10,
+                            graph_option=c("volcano","lollipop"),
+                            display_all_results_volcano=c("yes","no"), #display all the results in volcano plot (including results that is not significant: FDR not below the cut off)
+                            abundance_size_volcano=c("yes","no"), #change size of the dot based on relative abundance
+                            output_name,
+                            legend_onplot=c("yes","no"),
+                            decontam=NULL,
+                            taxa_genus_output) {
+  ###ensure intput_phyloseq is a absolute count phyloseq, not relative abundance phyloseq. and make sure phyloseq is in right orientation
+  # Enforce orientation. Samples are columns
+  if( !taxa_are_rows(input_phyloseq) ){ input_phyloseq <- t(input_phyloseq)}
+  countData_check <- floor(as(otu_table(input_phyloseq), "matrix")) # round down to nearest integer. if this phsyloeq is a relative abundance, then the entire countData_check would be 0
+  if (all(countData_check==0)) {stop("Please use phyloseq with absolute count. The current input physloeq contains relative abundnace")}
+  
+  if (missing(taxa_genus_output)) { taxa_genus_output<-"no"} #default being yes for taxa_rank_name, which will just give the selected taxa name
+  if (missing(graph_option)) { graph_option<-"lollipop"} #default being lollipop for graph_option
+  if (missing(display_all_results_volcano)) { display_all_results_volcano<-"no"} #default being lollipop for graph_option
+  if (missing(abundance_size_volcano)) { abundance_size_volcano<-"yes"} #default being lollipop for graph_option
+  
+  ## evaluate choices
+  legend_onplot <- match.arg(legend_onplot)
+
+  for (i in 1:length(outcome_to_compare)) {
+    assign(paste0("outcome_to_compare",i), outcome_to_compare[[i]])
+    assign(paste0("outcome_to_compare_color",i), outcome_to_compare_color[[i]])
+  }  
+  
+  ##coldata is the meta data
+  coldata<-as.data.frame(sample_data(input_phyloseq))
+  #getting taxa name
+  taxa.table <- as.data.frame(tax_table(input_phyloseq))
+  countdata<-as.data.frame(otu_table(input_phyloseq))
+  row.names(countdata)<-paste(taxa.table[[2]],taxa.table[[3]],taxa.table[[4]],taxa.table[[5]], taxa.table[[6]], taxa.table[[7]],rownames(taxa.table), sep=".")
+  taxa.table$combine_name<-paste(taxa.table[[2]],taxa.table[[3]],taxa.table[[4]],taxa.table[[5]], taxa.table[[6]], taxa.table[[7]],rownames(taxa.table), sep=".")
+  #Convert to numeric
+  countdata= data.frame(lapply(countdata, function(x) as.numeric(as.character(x))),
+                        check.names=F, row.names = rownames(countdata))
+  #Set order
+  coldata_SAMPLE <- data.frame(coldata[order(row.names(coldata)),],check.names=F)
+  countdata_SAMPLE <- data.frame(countdata[, order(colnames(countdata))],check.names=F)
+  
+  #making a compare variable to standardize the input variable for comparsion- make sure the reference is always control
+  coldata_SAMPLE$variable_to_compare<-coldata_SAMPLE[[variable_to_compare]]
+  coldata_SAMPLE<- coldata_SAMPLE %>% dplyr::mutate(compare=case_when((variable_to_compare==outcome_to_compare1)~"control", (variable_to_compare==outcome_to_compare2)~"treatment"))
+  coldata_SAMPLE<-coldata_SAMPLE[!is.na(coldata_SAMPLE$compare),] ###dropping subjects if they are not in the group of comparsion
+  coldata_SAMPLE$compare<- as.factor(coldata_SAMPLE$compare) #converting variable to factor
+  countdata_SAMPLE<-countdata_SAMPLE[,colnames(countdata_SAMPLE) %in% rownames(coldata_SAMPLE)]#making sure coldata has same subjects and countdata
+
+  taxa_name<- subset(taxa.table, select=c(combine_name))
+  
+  #Set order
+  coldata_SAMPLE <- data.frame(coldata_SAMPLE[order(row.names(coldata_SAMPLE)),])
+  countdata_SAMPLE <- data.frame(countdata_SAMPLE[, order(colnames(countdata_SAMPLE))])
+  #Added in code from SEB -> removes X in front of potential IDs that start with a number
+  # colnames(countdata_SAMPLE) <- gsub("^X", "", colnames(countdata_SAMPLE))
+  
+  #set up the phyloseq to make sure the control and treatment groups are correct. remove any observation that do not belong to the control and treatment group
+  phyloseq_edited<-input_phyloseq
+  sample_data(phyloseq_edited)$variable_to_compare <-sample_data(phyloseq_edited)[[variable_to_compare]]
+  phyloseq_edited2 <- phyloseq_edited %>% ps_mutate(compare=case_when((variable_to_compare==outcome_to_compare1)~"control", (variable_to_compare==outcome_to_compare2)~"treatment"))
+  keep_sample<- get_variable(phyloseq_edited2,"compare") %in% c("control", "treatment")
+  phyloseq_edited3 <- prune_samples(keep_sample, phyloseq_edited2)  ###keeping only samples with the outcome variable of choice 
+
+              #Run EDGER
+              ######from phyloseq_to_edgeR
+              #https://joey711.github.io/phyloseq-extensions/edgeR.html 
+                    if( !taxa_are_rows(phyloseq_edited3) ){ phyloseq_edited3 <- t(phyloseq_edited3) }
+                    x = as(otu_table(phyloseq_edited3), "matrix")
+                    # Add one to protect against overflow, log(0) issues.
+                    x = x + 1
+                    # Check `compare` argument
+                    if( identical(all.equal(length("compare"), 1), TRUE) & nsamples(phyloseq_edited3) > 1 ){
+                      # Assume that compare was a sample variable name (must be categorical)
+                      group = get_variable(phyloseq_edited3, "compare")
+                    }
+                    # Define gene annotations (`genes`) as tax_table
+                    taxonomy = tax_table(phyloseq_edited3, errorIfNULL=FALSE)
+                    if( !is.null(taxonomy) ){
+                      taxonomy = data.frame(as(taxonomy, "matrix"))
+                    } 
+                    # Now turn into a DGEList
+                    y = DGEList(counts=x, group=group, genes=taxonomy,remove.zeros = TRUE)
+                    # Calculate the normalization factors
+                    z = calcNormFactors(y, method="TMM")
+                    # Check for division by zero inside `calcNormFactors`
+                    if( !all(is.finite(z$samples$norm.factors)) ){
+                      stop("Something wrong with edgeR::calcNormFactors on this data,
+                           non-finite $norm.factors, consider changing `method` argument")
+                    }
+                    # Estimate dispersions
+                    dgeFull<-estimateTagwiseDisp(estimateCommonDisp(z))
+              dgeTest <- exactTest(dgeFull)
+              dgeTest <-dgeTest
+              dgeFull <-dgeFull
+              
+              
+              #Create Table
+              resNoFilt <- topTags(dgeTest, n=nrow(dgeTest$table))
+              resNoFilt <- data.frame(resNoFilt)
+              resNoFilt<-merge(resNoFilt,taxa_name, by="row.names")
+              row.names(resNoFilt)<-resNoFilt$combine_name 
+              resNoFilt<- subset(resNoFilt,select=c(logFC, logCPM, PValue, FDR))
+              resNoFilt_export<<-resNoFilt
+              #check to see if there is any taxa with FDR<FDR_cut_off. If not then will stop the function, because there will be error if it continues as the object will have no rows
+                    checkifallzero<-resNoFilt[resNoFilt$FDR<FDR_cut_off,]
+                    if (dim(checkifallzero)[1] == 0) {
+                              print(paste0("no Taxa with FDR more than",FDR_cut_off))
+                              return(NULL)
+                    }
+              resNoFilt[nrow(resNoFilt) + 1,] <- c(0, 0, 0, 0) ###adding this row of 0 so that even if there is no significant top 10 for upregulated or downregulated, the code will still run
+              #Create Table of Down Regulated
+              sigDownReg <- resNoFilt[resNoFilt$FDR<FDR_cut_off,] #keeping only FDR < 0.2
+              #sigDownReg <- resNoFilt
+              sigDownReg <- sigDownReg[sigDownReg$logFC<=0,] ##keeping only the negative logFC
+              sigDownReg <- sigDownReg[order(sigDownReg$logFC),]
+              sigDownReg1 <<- sigDownReg %>% dplyr::slice(1:number_display) #Subset Top (number_display)
+              #Create Table of Up Regulated
+              sigUpReg <- resNoFilt[resNoFilt$FDR<FDR_cut_off,] #keeping only FDR < 0.2
+              #sigUpReg <- resNoFilt
+              sigUpReg <- sigUpReg[sigUpReg$logFC>=0,] ##keeping only the positive logFC
+              sigUpReg <- sigUpReg[order(sigUpReg$logFC, decreasing=TRUE),]
+              sigUpReg1 <<- sigUpReg %>% dplyr::slice(1:number_display) #Subset Top (number_display)
+              #Merge Top 10s
+              res <- rbind(sigDownReg1,sigUpReg1)
+              res <- res[res$logFC!=0,] 
+              #remove the 0 column which was used as a place holder
+              resNoFilt <- resNoFilt[resNoFilt$logFC!=0,] 
+              
+              #Create Relative Abundance Table
+              df <-
+                countdata_SAMPLE %>% 
+                rownames_to_column('gs') %>%
+                dplyr::group_by(gs) %>% 
+                dplyr::summarise_all(funs(sum)) %>%
+                dplyr::mutate_if(is.numeric, funs(./sum(.))) %>%
+                column_to_rownames('gs')
+              df_export<-df
+              #Get the ColData for Each Comparison
+              coldata.1 <- coldata_SAMPLE[coldata_SAMPLE[[variable_to_compare]]==outcome_to_compare1,]
+              coldata.2 <- coldata_SAMPLE[coldata_SAMPLE[[variable_to_compare]]==outcome_to_compare2,]
+              #keep Count data only for each comparison
+              needed<-which(colnames(df) %in% rownames(coldata.1))    
+              df.1 <- df[,needed]
+              needed2<-which(colnames(df) %in% rownames(coldata.2))    
+              df.2 <- df[,needed2]
+              #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#  
+              if (display_all_results_volcano=="yes" & graph_option=="volcano"){ #if want to display all results, then will replace res by resNoFilt (which does not select the top results)
+                res<-resNoFilt
+              }
+              
+              #Convert Resuts table into a data.frame
+              res <- as.data.frame(res)
+              resdf_check <<- res
+              #decide what otu to save 
+              otu.to.save <-as.character(rownames(res))
+              #from relative table we should get the mean across the row of the otu table
+              df.1.meanRA <- rowMeans(df.1)
+              df.2.meanRA <- rowMeans(df.2)
+              #need to subset AND reorder just the otus that we have 
+              df.1.meanRA.save <- df.1.meanRA[otu.to.save]
+              df.2.meanRA.save <- df.2.meanRA[otu.to.save]
+              #add the abundnace data for the res dataframe
+              res$abundance.1 <- df.1.meanRA.save
+              res$abundance.2 <- df.2.meanRA.save
+              #Set Names of Results Table
+              res <- setNames(cbind(rownames(res), res, row.names = NULL), c("Taxa","logFC", "lfcSE", "pvalue", "adj.P.Val","abundance.1","abundance.2")) 
+              #Remove Any Data without LOGFC data
+              res <- res[!is.na(res$logFC),]
+              # Reorder Results based on FDR for comparison 1
+              res = res[order(-res$logFC, na.last = TRUE), ]
+              #Create Order
+              res <- res %>% dplyr::mutate(start = 1:n())
+              #Convert Important columns to Numeric
+              res$adj.P.Val <- as.numeric(as.character(res$adj.P.Val))
+              res$logFC <- as.numeric(as.character(res$logFC))
+              #Replace NA
+              res <- res %>% dplyr::mutate(adj.P.Val = if_else(is.na(adj.P.Val), 0.9, adj.P.Val))
+              ##convert abundance to numeric
+              res$abundance.1 <- as.numeric(as.character(res$abundance.1))
+              res$abundance.2 <- as.numeric(as.character(res$abundance.2))
+              #Create Variable for Color based on Comparison, FDR and LOGFC
+              res$col <- ifelse(res$logFC>0, "B",
+                                ifelse(res$logFC<0, "A","D"))
+              res$abundance <- ifelse(res$col=="A", res$abundance.1, ifelse(res$col=="B", res$abundance.2,0))
+              
+              if (taxa_genus_output=="no") {
+                res$Taxa2 <- paste0(substr(sapply(strsplit(res$Taxa,".",fixed=T),"[[",1),1,6),
+                                    paste0("..",paste0(substr(sapply(strsplit(res$Taxa,".",fixed=T),"[[",4),1,10),".."),
+                                           paste0(substr(sapply(strsplit(res$Taxa,".",fixed=T),"[[",5),1,10),paste0("..",str_sub(res$Taxa,-4,-1)))))  
+              } else if (taxa_genus_output=="yes") {#keeping only genus level. if genus level is NA, then will go up a taxa rank
+                res<- res %>% dplyr::mutate(Taxa2=case_when((sapply(strsplit(Taxa,".",fixed=T),"[[",1)=="NA")~"k_Bacteria.p_NA.c_NA.o_NA.f_NA.g_NA",
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",1)!="NA") & (sapply(strsplit(Taxa,".",fixed=T),"[[",2)=="NA"))~paste0(paste0("p_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",1)),".c_NA.o_NA.f_NA.g_NA"), 
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",2)!="NA") & (sapply(strsplit(Taxa,".",fixed=T),"[[",3)=="NA"))~paste0(paste0("c_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",2)),".o_NA.f_NA.g_NA"), 
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",3)!="NA") & (sapply(strsplit(Taxa,".",fixed=T),"[[",4)=="NA"))~paste0(paste0("o_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",3)),".f_NA.g_NA"), 
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",4)!="NA") & (sapply(strsplit(Taxa,".",fixed=T),"[[",5)=="NA"))~paste0(paste0("f_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",4)),".g_NA"),
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",5)!="NA"))~paste0("g_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",5)) ))
+              }
+              res <- res %>% dplyr::mutate(Taxa2 = paste0(Taxa2, ".", substr(Taxa, nchar(Taxa)-2, nchar(Taxa))))
+              #########EXCEL EXPORT
+              ####keeping all results 
+              res_all <- rbind(sigDownReg,sigUpReg)
+              res_all <- res_all[res_all$logFC!=0,] 
+              
+              #Convert Resuts table into a data.frame
+              res_all <- as.data.frame(res_all)
+              #decide what otu to save 
+              otu.to.save_all <-as.character(rownames(res_all))
+              #need to subset AND reorder just the otus that we have 
+              df.1.meanRA.save <- df.1.meanRA[otu.to.save_all]
+              df.2.meanRA.save <- df.2.meanRA[otu.to.save_all]
+              #add the abundnace data for the res dataframe
+              res_all$abundance.1 <- df.1.meanRA.save
+              res_all$abundance.2 <- df.2.meanRA.save
+            
+              #Set Names of Results Table
+              res_all <- setNames(cbind(rownames(res_all), res_all, row.names = NULL), c("Taxa","logFC", "lfcSE", "pvalue", "adj.P.Val","abundance.1","abundance.2")) 
+              
+              #changing the name of abundance
+              abundance1<-paste0("abundnace__",outcome_to_compare[[1]])
+              abundance2<-paste0("abundnace__",outcome_to_compare[[2]])
+              names(res_all)[names(res_all) == "abundance.1"] <- abundance1
+              names(res_all)[names(res_all) == "abundance.2"] <- abundance2
+              csv_output<-paste0(output_name,"_significant.csv")
+              write.csv(res_all,file=csv_output, row.names = TRUE)
+              
+              #res_all contains all results including not significant results
+              #Convert Resuts table into a data.frame
+              res_all <- as.data.frame(resNoFilt)
+              #decide what otu to save 
+              otu.to.save_all <-as.character(rownames(res_all))
+              #need to subset AND reorder just the otus that we have 
+              df.1.meanRA.save <- df.1.meanRA[otu.to.save_all]
+              df.2.meanRA.save <- df.2.meanRA[otu.to.save_all]
+              #add the abundnace data for the res dataframe
+              res_all$abundance.1 <- df.1.meanRA.save
+              res_all$abundance.2 <- df.2.meanRA.save
+              csv_output2<-paste0(output_name,"_all.csv")
+              write.csv(resNoFilt_export,file=csv_output2, row.names = TRUE)
+              
+              ######################################################################################################################
+              ######################################################################################################################
+              ####merge in decontam list to change the contaminant taxa red
+              if (!missing(decontam)) { #if decontam option is selected, determine if the df object exist
+                if (exists(decontam)=="FALSE"){
+                  print(paste0("decontam list:",paste0(decontam," does not exist")))
+                  stop("please run function: decontaminant_subplot_KW prior to using this option- decontam") 
+                } else{
+                  res_original<-res
+                  res<-merge(res, get(decontam),by.x="Taxa",by.y="row.names",All.x=all)
+                  res<- res[order(res$logFC, na.last = TRUE), ]
+                  contaminant_color <- ifelse(res$contaminant == "TRUE", "red", "black")
+                }
+              }  else{
+                contaminant_color<-"black" ###if no decontam list was supplied, then will have all the label as black 
+              }
+              checK_res <<- res
+              
+              ######################################################################################################################
+              ######################################################################################################################
+              
+              if (graph_option=="volcano") {
+                          #=========================================================
+                          #////////////////////VOLCANO PLOT///////////////////////
+                          #=========================================================
+                          # Compute significance, with a maximum of 350 for the p-values set to 0 due to limitation of computation precision
+                          res$sig <- -log10(res$adj.P.Val)
+                          res[is.infinite(res$sig),"sig"] <- 350
+                          ## Volcano plot of adjusted p-values
+                          cols <- densCols(res$logFC, res$sig)
+                          cols[res$pvalue ==0] <- "purple"
+                          #only significant values get display
+                          cols[res$logFC > 0 & res$adj.P.Val < FDR_cut_off ] <- outcome_to_compare_color2
+                          cols[res$logFC < 0 & res$adj.P.Val < FDR_cut_off ] <- outcome_to_compare_color1
+                          cols[res$adj.P.Val > FDR_cut_off ] <- "grey"
+                          
+                          ####scaling the abundance so the circle size on the graph is standardized
+                          res_keep<-res[!(is.na(res$adj.P.Val)),]
+                          res_keep<-res_keep[res_keep$adj.P.Val<FDR_cut_off,]
+                          min_value<-min(res_keep$abundance)
+                          #make the abundance of the nonsignificant results to be minimal value
+                          res$abundance[res$adj.P.Val > FDR_cut_off]<-min_value
+                          
+                          if (abundance_size_volcano=="yes"){ #if want point size to be scaled by relative abundance
+                            p<-ggplot(res, aes(x = logFC, y = sig, label=Taxa2)) +
+                              geom_point(aes(size =abundance),color=cols, alpha=0.5) + #Chose Colors and size for dots
+                              scale_size(range = c(0, 40))+
+                              geom_text_repel(aes(label=ifelse(res$logFC<(-1) & res$adj.P.Val < FDR_cut_off , as.character(res$Taxa2),'')),size=3,force=25,segment.colour="grey",segment.alpha=0.5,  colour = contaminant_color) +
+                              geom_text_repel(aes(label=ifelse(res$logFC>1 & res$adj.P.Val < FDR_cut_off , as.character(res$Taxa2),'')),size=3,force=25,segment.colour="grey",segment.alpha=0.5,  colour = contaminant_color) +
+                              geom_hline(yintercept=-log10(FDR_cut_off), color="red",linetype="dashed") +
+                              xlab("Effect size: log2(fold-change)") +
+                              ylab("-log10(adjusted p-value)") + 
+                              theme(panel.background = element_blank(),
+                                    panel.border=element_rect(fill=NA),
+                                    legend.background = element_rect(color=NA),
+                                    legend.key = element_rect(colour = "transparent", fill = "white"),
+                                    plot.title=element_text(size=23, face="bold"))
+                          } else {
+                            p<-ggplot(res, aes(x = logFC, y = sig, label=Taxa2)) +
+                              geom_point(color=cols, alpha=0.5) + #Chose Colors and size for dots
+                              geom_text_repel(aes(label=ifelse(res$logFC<(-1) & res$adj.P.Val < FDR_cut_off , as.character(res$Taxa2),'')),size=3,force=25,segment.colour="grey",segment.alpha=0.5,  colour = contaminant_color) +
+                              geom_text_repel(aes(label=ifelse(res$logFC>1 & res$adj.P.Val < FDR_cut_off , as.character(res$Taxa2),'')),size=3,force=25,segment.colour="grey",segment.alpha=0.5,  colour = contaminant_color) +
+                              geom_hline(yintercept=-log10(FDR_cut_off), color="red",linetype="dashed") +
+                              xlab("Effect size: log2(fold-change)") +
+                              ylab("-log10(adjusted p-value)") + 
+                              theme(panel.background = element_blank(),
+                                    panel.border=element_rect(fill=NA),
+                                    plot.title=element_text(size=23, face="bold"))
+                          }
+              }
+              else if (graph_option=="lollipop") {
+                        p<-ggplot(res, aes(y=reorder(Taxa2,logFC), x=logFC,fill=col,size=abundance)) +
+                          geom_point(color="black",alpha=0.9,shape=21)+
+                          geom_segment(data=res[res$adj.P.Val<0.2,],aes(yend=reorder(Taxa2,-start)), xend=(-30), color= "black", linetype = "solid",linewidth=1)+ 
+                          scale_fill_manual(values=c("B"=outcome_to_compare_color2,"A"=outcome_to_compare_color1,"D"="white"))+ 
+                          scale_size_continuous(name="Relative Abundance",range=c(5, 20))+                
+                          ggtitle("EdgeR")+
+                          theme(panel.background = element_blank(),
+                                panel.border=element_rect(fill=NA),
+                                panel.grid.major.y = element_line(colour = "#EBEBEB",linetype="dashed"),
+                                panel.grid.minor = element_blank(),
+                                strip.background=element_blank(),
+                                axis.title=element_text(size=20,face="bold"),
+                                axis.text.x=element_text(colour="black", size=18, face="bold"),
+                                axis.text.y=element_text(colour=contaminant_color,face="bold",size=10),
+                                axis.ticks=element_line(colour="gray70"),
+                                legend.background = element_rect(color=NA),
+                                legend.key = element_rect(colour = "transparent", fill = "white"),
+                                plot.title=element_text(size=23, face="bold"))+
+                          xlab("") +
+                          ylab("")+
+                          #xlim(-7,7)+
+                          geom_vline(xintercept=0, color="red",linetype="dashed")+
+                          guides(fill="none")
+                        ##save the legend on a separate png file              
+              }          
+              if (legend_onplot=="no") { #if want to hide the legend on the plot, then will save the legend on separate png
+                  leg <- get_legend(p)
+                  png_output2<-paste0(output_name,"_legend.png")
+                  png(png_output2, res = 300, width=200, height=200, units='mm')
+                  legend<-as_ggplot(leg)
+                  show(legend)
+                  dev.off()
+                  p<-p + theme(legend.position = "none") ###remove the legend
+              }
+              png_output<-paste0(output_name,".png")
+              png(file=png_output, res = 300, width=200, height=200 , units='mm')
+                    show(p)
+              dev.off()
+}
+
+```
+
+```{r 16s modified volcano plot}
+input_phyloseq <- PPI.OTU.Table.genus
+variable_to_compare <- "PPI_Current" 
+outcome_to_compare1 <- "No"
+outcome_to_compare_color1 <- "blue"
+outcome_to_compare_color2 <- "darkorange1"
+outcome_to_compare2 <- "Yes"
+FDR_cut_off <- 0.2
+number_display <- 30
+output_name <- "genus_volcano_PPI"
+cols <- "grey" 
+
+
+#Orientation - Transpose if taxa aren't rows
+if( !taxa_are_rows(input_phyloseq) ){ input_phyloseq <- t(input_phyloseq)}
+
+##coldata is the meta data
+coldata<-as.data.frame(sample_data(input_phyloseq))
+
+  #getting taxa name
+taxa.table <- as.data.frame(tax_table(input_phyloseq))
+countdata<-as.data.frame(otu_table(input_phyloseq))
+row.names(countdata)<-paste(taxa.table[[2]],taxa.table[[3]],taxa.table[[4]],taxa.table[[5]], taxa.table[[6]], taxa.table[[7]],rownames(taxa.table), sep=".")
+taxa.table$combine_name<-paste(taxa.table[[2]],taxa.table[[3]],taxa.table[[4]],taxa.table[[5]], taxa.table[[6]], taxa.table[[7]],rownames(taxa.table), sep=".")
+
+#Convert to numeric
+countdata= data.frame(lapply(countdata, function(x) as.numeric(as.character(x))),
+                        check.names=F, row.names = rownames(countdata))
+
+#Set order
+  coldata_SAMPLE <- data.frame(coldata[order(row.names(coldata)),],check.names=F)
+  countdata_SAMPLE <- data.frame(countdata[, order(colnames(countdata))],check.names=F)
+
+  
+#making a compare variable to standardize the input variable for comparsion- make sure the reference is always control
+  coldata_SAMPLE$variable_to_compare<-coldata_SAMPLE[[variable_to_compare]]
+  coldata_SAMPLE<- coldata_SAMPLE %>% dplyr::mutate(compare=case_when((variable_to_compare==outcome_to_compare1)~"control", (variable_to_compare==outcome_to_compare2)~"treatment"))
+  coldata_SAMPLE<-coldata_SAMPLE[!is.na(coldata_SAMPLE$compare),] ###dropping subjects if they are not in the group of comparsion
+  coldata_SAMPLE$compare<- as.factor(coldata_SAMPLE$compare) #converting variable to factor
+  countdata_SAMPLE<-countdata_SAMPLE[,colnames(countdata_SAMPLE) %in% rownames(coldata_SAMPLE)]#making sure coldata has same subjects and countdata
+  
+taxa_name<- subset(taxa.table, select=c(combine_name))
+
+  #Set order
+  coldata_SAMPLE <- data.frame(coldata_SAMPLE[order(row.names(coldata_SAMPLE)),])
+  countdata_SAMPLE <- data.frame(countdata_SAMPLE[, order(colnames(countdata_SAMPLE))])
+  
+  #set up the phyloseq to make sure the control and treatment groups are correct. remove any observation that do not belong to the control and treatment group
+  phyloseq_edited<-input_phyloseq
+
+sample_data(phyloseq_edited)$compare <- NA
+sample_data(phyloseq_edited)$compare[sample_data(phyloseq_edited)[[variable_to_compare]] == outcome_to_compare1] <- "control"
+sample_data(phyloseq_edited)$compare[sample_data(phyloseq_edited)[[variable_to_compare]] == outcome_to_compare2] <- "treatment"
+
+#Convert to Factor
+sample_data(phyloseq_edited)$compare <- factor(sample_data(phyloseq_edited)$compare,levels = c("control", "treatment"))
+
+# Now define keep_sample separately
+keep_sample <- get_variable(phyloseq_edited, "compare") %in% c("control", "treatment")
+phyloseq_edited3 <- prune_samples(keep_sample, phyloseq_edited)
+
+              #Run EDGER
+              ######from phyloseq_to_edgeR
+              #https://joey711.github.io/phyloseq-extensions/edgeR.html 
+                    if( !taxa_are_rows(phyloseq_edited3) ){ phyloseq_edited3 <- t(phyloseq_edited3) }
+                    x = as(otu_table(phyloseq_edited3), "matrix")
+                    # Add one to protect against overflow, log(0) issues.
+                    x = x + 1
+                    # Check `compare` argument
+                    if( identical(all.equal(length("compare"), 1), TRUE) & nsamples(phyloseq_edited3) > 1 ){
+                      # Assume that compare was a sample variable name (must be categorical)
+                      group = get_variable(phyloseq_edited3, "compare")
+                    }
+                    # Define gene annotations (`genes`) as tax_table
+                    taxonomy = tax_table(phyloseq_edited3, errorIfNULL=FALSE)
+                    if( !is.null(taxonomy) ){
+                      taxonomy = data.frame(as(taxonomy, "matrix"))
+                    } 
+                    # Now turn into a DGEList
+                    y = DGEList(counts=x, group=group, genes=taxonomy,remove.zeros = TRUE)
+                    # Calculate the normalization factors
+                    z = calcNormFactors(y, method="TMM")
+                    # Check for division by zero inside `calcNormFactors`
+                    if( !all(is.finite(z$samples$norm.factors)) ){
+                      stop("Something wrong with edgeR::calcNormFactors on this data,
+                           non-finite $norm.factors, consider changing `method` argument")
+                    }
+                    # Estimate dispersions
+                    dgeFull<-estimateTagwiseDisp(estimateCommonDisp(z))
+              dgeTest <- exactTest(dgeFull)
+              dgeTest <-dgeTest
+              dgeFull <-dgeFull
+
+              #Create Table
+              resNoFilt <- topTags(dgeTest, n=nrow(dgeTest$table))
+              resNoFilt <- data.frame(resNoFilt)
+              resNoFilt<-merge(resNoFilt,taxa_name, by="row.names")
+              row.names(resNoFilt)<-resNoFilt$combine_name 
+              resNoFilt<- subset(resNoFilt,select=c(logFC, logCPM, PValue, FDR))
+              resNoFilt_export<<-resNoFilt
+
+              # Identify significant taxa
+              sig_taxa <- resNoFilt[resNoFilt$FDR < FDR_cut_off, ]
+              sig_taxa_names <- rownames(sig_taxa)
+
+              if (nrow(sig_taxa) == 0) {
+                message(paste0("⚠️ No taxa with FDR <", FDR_cut_off, " — continuing with all taxa as grey."))
+              }
+                    
+            #  resNoFilt[nrow(resNoFilt) + 1,] <- c(0, 0, 0, 0) ###adding this row of 0 so that even if there is no significant top 10 for upregulated or downregulated, the code will still run
+              #Create Table of Down Regulated
+              sigDownReg <- resNoFilt[resNoFilt$FDR<FDR_cut_off,] #keeping only FDR < 0.2
+              #sigDownReg <- resNoFilt
+              sigDownReg <- sigDownReg[sigDownReg$logFC<=0,] ##keeping only the negative logFC
+              sigDownReg <- sigDownReg[order(sigDownReg$logFC),]
+              sigDownReg1 <<- sigDownReg %>% dplyr::slice(1:number_display) #Subset Top (number_display)
+              #Create Table of Up Regulated
+              sigUpReg <- resNoFilt[resNoFilt$FDR<FDR_cut_off,] #keeping only FDR < 0.2
+              #sigUpReg <- resNoFilt
+              sigUpReg <- sigUpReg[sigUpReg$logFC>=0,] ##keeping only the positive logFC
+              sigUpReg <- sigUpReg[order(sigUpReg$logFC, decreasing=TRUE),]
+              sigUpReg1 <<- sigUpReg %>% dplyr::slice(1:number_display) #Subset Top (number_display)
+              #Merge Top 10s
+              sigDownReg <- resNoFilt[resNoFilt$FDR < FDR_cut_off & resNoFilt$logFC <= 0,]
+              sigUpReg   <- resNoFilt[resNoFilt$FDR < FDR_cut_off & resNoFilt$logFC >= 0,]
+
+              # Keep all taxa for the volcano plot
+                res <- resNoFilt
+  
+              #remove the 0 column which was used as a place holder
+              # resNoFilt <- resNoFilt[resNoFilt$logFC!=0,] 
+              
+             #=== Relative Abundance Table ===
+             # ===============================
+
+             df <- countdata_SAMPLE %>%
+               rownames_to_column('gs') %>%
+               group_by(gs) %>%
+               summarise_all(sum) %>%
+               mutate_if(is.numeric, ~ . / sum(.)) %>%
+               column_to_rownames('gs')
+
+             # Compute mean relative abundance only for significant taxa
+             df_sig <- df[rownames(df) %in% sig_taxa_names, , drop = FALSE]
+
+             coldata.1 <- coldata_SAMPLE[coldata_SAMPLE[[variable_to_compare]] == outcome_to_compare1, ]
+             coldata.2 <- coldata_SAMPLE[coldata_SAMPLE[[variable_to_compare]] == outcome_to_compare2, ]
+
+             df.1.meanRA <- if (nrow(df_sig) > 0) rowMeans(df_sig[, colnames(df_sig) %in% rownames(coldata.1), drop = FALSE]) else numeric(0)
+             df.2.meanRA <- if (nrow(df_sig) > 0) rowMeans(df_sig[, colnames(df_sig) %in% rownames(coldata.2), drop = FALSE]) else numeric(0)
+
+             # Assign tiny pseudo-abundance for non-sig taxa
+             pseudo_abundance <- ifelse(length(df.1.meanRA) > 0,
+                           min(c(df.1.meanRA, df.2.meanRA), na.rm = TRUE) * 0.01,
+                           1e-8)
+
+              
+             # Initialize full abundance vectors with pseudo values
+             df.1.meanRA_all <- setNames(rep(pseudo_abundance, nrow(resNoFilt)), rownames(resNoFilt))
+             df.2.meanRA_all <- df.1.meanRA_all
+
+             # Replace sig taxa with true mean RA values
+             if (length(df.1.meanRA) > 0) df.1.meanRA_all[names(df.1.meanRA)] <- df.1.meanRA
+             if (length(df.2.meanRA) > 0) df.2.meanRA_all[names(df.2.meanRA)] <- df.2.meanRA
+
+             # Add to results
+             resNoFilt$abundance.1 <- df.1.meanRA_all[rownames(resNoFilt)]
+             resNoFilt$abundance.2 <- df.2.meanRA_all[rownames(resNoFilt)]
+             resNoFilt$abundance   <- pmax(resNoFilt$abundance.1, resNoFilt$abundance.2, na.rm = TRUE)
+             
+             res <- resNoFilt
+ 
+             #Set Names of Results Table
+res <- setNames(cbind(rownames(res), res, row.names = NULL), c("Taxa","logFC", "lfcSE", "pvalue", "FDR","abundance.1","abundance.2","abundance"))  
+
+                        res<- res %>% dplyr::mutate(Taxa2=case_when((sapply(strsplit(Taxa,".",fixed=T),"[[",1)=="NA")~"k_Bacteria.p_NA.c_NA.o_NA.f_NA.g_NA",
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",1)!="NA") & (sapply(strsplit(Taxa,".",fixed=T),"[[",2)=="NA"))~paste0(paste0("p_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",1)),".c_NA.o_NA.f_NA.g_NA"), 
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",2)!="NA") & (sapply(strsplit(Taxa,".",fixed=T),"[[",3)=="NA"))~paste0(paste0("c_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",2)),".o_NA.f_NA.g_NA"), 
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",3)!="NA") & (sapply(strsplit(Taxa,".",fixed=T),"[[",4)=="NA"))~paste0(paste0("o_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",3)),".f_NA.g_NA"), 
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",4)!="NA") & (sapply(strsplit(Taxa,".",fixed=T),"[[",5)=="NA"))~paste0(paste0("f_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",4)),".g_NA"),
+                                                            ((sapply(strsplit(Taxa,".",fixed=T),"[[",5)!="NA"))~paste0("g_",sapply(strsplit(res$Taxa,".",fixed=T),"[[",5)) ))             
+res <- res %>% dplyr::mutate(Taxa2 = paste0(Taxa2, ".", substr(Taxa, nchar(Taxa)-2, nchar(Taxa))))  
+head(res)
+             # ===============================
+             # === Add effect size and colors ===
+             # ===============================
+
+ # --- Compute -log10 FDR (or adj.P.Val) for y-axis
+res$sig <- -log10(res$FDR)
+res[is.infinite(res$sig), "sig"] <- 350  # handle zeros
+
+# --- Define colors
+cols <- rep("grey", nrow(res))
+cols[res$logFC > 0 & res$FDR < FDR_cut_off] <- outcome_to_compare_color2
+cols[res$logFC < 0 & res$FDR < FDR_cut_off] <- outcome_to_compare_color1
+
+# --- Determine top taxa for bold labels
+top_up <- res %>%
+  filter(logFC > 0 & FDR < FDR_cut_off) %>%
+  arrange(desc(logFC)) %>%
+  slice_head(n = 50) %>%
+  pull(Taxa2)
+
+top_down <- res %>%
+  filter(logFC < 0 & FDR < FDR_cut_off) %>%
+  arrange(logFC) %>%
+  slice_head(n = 50) %>%
+  pull(Taxa2)
+
+top_taxa <- c(top_up, top_down)
+res$bold_label <- res$Taxa2 %in% top_taxa
+
+# --- Scale label size by abundance
+min_text_size <- 4
+max_text_size <- 15
+#res$label_size <- pmax(res$abundance / max(res$abundance, na.rm = TRUE) * max_text_size, min_text_size)
+
+res$label_size <- scales::rescale(res$abundance, to = c(min_text_size, max_text_size))
+
+
+# Subset data
+down_sig <- subset(res, logFC < -1 & FDR < FDR_cut_off)
+up_sig <- subset(res, logFC > 1 & FDR < FDR_cut_off)
+
+p <- ggplot(res, aes(x = logFC, y = sig)) +
+  geom_point(aes(size = abundance), color = cols, alpha = 0.8) +
+  scale_size_continuous(range = c(1, 40)) +
+
+  # Downregulated labels
+  geom_text_repel(
+    data = down_sig,
+    aes(label = Taxa2, fontface = ifelse(bold_label, "bold", "plain")),
+    size = down_sig$label_size,   # use numeric vector here
+    force = 25,
+    segment.colour = "grey",
+    segment.alpha = 0.5,
+    min.segment.length = 0
+  ) +
+
+  # Upregulated labels
+  geom_text_repel(
+    data = up_sig,
+    aes(label = Taxa2, fontface = ifelse(bold_label, "bold", "plain")),
+    size = up_sig$label_size,  # numeric vector
+    force = 25,
+    segment.colour = "grey",
+    segment.alpha = 0.5,
+    min.segment.length = 0
+  ) +
+
+  geom_hline(yintercept = -log10(FDR_cut_off), color = "red", linetype = "dashed") +
+  xlab("Effect size: log2(fold-change)") +
+  ylab("-log10(adjusted p-value)") +
+  theme(
+    panel.background = element_blank(),
+    panel.border = element_rect(fill = NA),
+    legend.background = element_rect(color = NA),
+    legend.key = element_rect(colour = "transparent", fill = "white"),
+    plot.title = element_text(size = 23, face = "bold"),
+    axis.title.x = element_text(size = 23, face = "bold"),  # Set size of x-axis title
+    axis.title.y = element_text(size = 23, face = "bold"),  # Set size of y-axis title
+    axis.text = element_text(size = 16)    
+  ) +
+  guides(size = "none")
+
+
+# --- Save as PNG
+png_output <- paste0(output_name, ".png")
+png(file = png_output, res = 300, width = 300, height = 300, units = 'mm')
+print(p)
+dev.off()
+ 
+
+
+ 
+```
+
